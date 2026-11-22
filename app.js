@@ -588,7 +588,7 @@
 
   var ICO = {
     pen: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4.2L19 9.2a2.9 2.9 0 0 0-4.2-4.2L4 15.8V20z"/><path d="M14.2 5.6 18.4 9.8"/></svg>',
-    run: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5v5M7.5 7v10M16.5 7v10M20 9.5v5M7.5 12h9"/></svg>',
+    run: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 13.2h3.3l2-5.2 3.1 9.6 2.1-4.4h5"/></svg>',
     plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>'
   };
   function slot(ico, t1, t2) {
