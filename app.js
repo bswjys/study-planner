@@ -182,11 +182,12 @@
   }
   function roundDays(no) { return P.days.filter(function (d) { return d.round === no; }); }
   function roundOfDate(iso) { return P.byDate[iso] ? P.byDate[iso].round : (iso < META.start ? 1 : P.n); }
+  // 이번 주 7칸: 일요일(주일) 시작 ~ 토요일 끝. 캘린더 탭(일~토)과 같은 주 경계를 쓴다.
   function weekOf(iso) {
     var t = parse(iso);
-    var monday = new Date(t.getFullYear(), t.getMonth(), t.getDate() - ((t.getDay() + 6) % 7));
+    var sunday = new Date(t.getFullYear(), t.getMonth(), t.getDate() - t.getDay());
     var out = [];
-    for (var i = 0; i < 7; i++) out.push(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i));
+    for (var i = 0; i < 7; i++) out.push(new Date(sunday.getFullYear(), sunday.getMonth(), sunday.getDate() + i));
     return out;
   }
   function statWeek() {
@@ -569,7 +570,7 @@
       '<div class="info-row"><span class="k">학습일</span><span class="v">' + META.studyDays + '일 (주일 제외)</span></div>' +
       '<div class="info-row"><span class="k">범위</span><span class="v">' + META.books + '권 ' + nf(META.printedQuestions) + '문항 × ' + P.n + '회독</span></div>' +
       '<div class="info-row"><span class="k">삭제 문항</span><span class="v" style="font-size:12.5px">' + META.deleted.join(' · ') + '</span></div>' +
-      '<div class="info-row"><span class="k">앱 버전</span><span class="v">1.1.0</span></div>' +
+      '<div class="info-row"><span class="k">앱 버전</span><span class="v">1.2.0</span></div>' +
       '</div>';
 
     h += '<div class="section-title">홈 화면에 추가</div>' +
