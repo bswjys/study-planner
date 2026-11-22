@@ -1,5 +1,6 @@
-/* 장신대 플래너 — 오프라인 캐시 (앱을 열 때 새 버전이 있으면 받아 둔다) */
-var CACHE = 'jangsin-planner-v1-2026-11-22';
+/* 장신대 플래너 — 오프라인 캐시
+   온라인일 때는 항상 새 파일을 받고(업데이트 즉시 반영), 오프라인일 때만 캐시를 쓴다. */
+var CACHE = 'jangsin-planner-v2-2026-11-22';
 var ASSETS = [
   './',
   './index.html',
@@ -32,31 +33,19 @@ self.addEventListener('fetch', function (e) {
   try { url = new URL(req.url); } catch (err) { return; }
   if (url.origin !== location.origin) return;
 
-  // 페이지 이동은 네트워크 우선(새 버전 반영), 실패하면 캐시
-  if (req.mode === 'navigate') {
-    e.respondWith(
-      fetch(req).then(function (res) {
-        var copy = res.clone();
-        caches.open(CACHE).then(function (c) { c.put('./index.html', copy); });
-        return res;
-      }).catch(function () {
-        return caches.match('./index.html').then(function (r) { return r || caches.match('./'); });
-      })
-    );
-    return;
-  }
-
-  // 나머지는 캐시 우선 + 뒤에서 갱신
   e.respondWith(
-    caches.match(req).then(function (hit) {
-      var net = fetch(req).then(function (res) {
-        if (res && res.status === 200) {
-          var copy = res.clone();
-          caches.open(CACHE).then(function (c) { c.put(req, copy); });
-        }
-        return res;
-      }).catch(function () { return hit; });
-      return hit || net;
+    fetch(req).then(function (res) {
+      if (res && res.status === 200) {
+        var copy = res.clone();
+        caches.open(CACHE).then(function (c) { c.put(req, copy); });
+      }
+      return res;
+    }).catch(function () {
+      return caches.match(req).then(function (hit) {
+        if (hit) return hit;
+        if (req.mode === 'navigate') return caches.match('./index.html');
+        return Response.error();
+      });
     })
   );
 });
