@@ -26,6 +26,8 @@
     return d.getFullYear() + '. ' + (d.getMonth() + 1) + '. ' + d.getDate() + '(' + DOW[d.getDay()] + ')';
   }
   function nf(n) { return n.toLocaleString('ko-KR'); }
+  function isIso(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s); }
+  function clampInt(v, lo, hi) { v = Math.round(Number(v) || 0); return Math.max(lo, Math.min(hi, v)); }
 
   var qs = new URLSearchParams(location.search);
   var TODAY = (function () {
@@ -33,17 +35,19 @@
     return v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : ymd(new Date());
   })();
 
-  /* ---------- 공부 날짜 · 문항 순서 ---------- */
-  var STUDY_DATES = (function () {
+  /* ---------- 공부 날짜 집합 (주일 포함 / 제외) ---------- */
+  function datesBetween(incSun) {
     var out = [], d = parse(META.start), end = parse(META.end);
     while (d <= end) {
-      if (d.getDay() !== 0) out.push(ymd(d));
+      if (incSun || d.getDay() !== 0) out.push(ymd(d));
       d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
     }
     return out;
-  })();
+  }
+  var DATES_SUN = datesBetween(true);   // 2026-11-23 ~ 2027-11-30 전체 373일
+  var DATES_WEEK = datesBetween(false); // 주일 제외 320일
 
-  // 인쇄 번호 순서대로 3,009문항
+  /* ---------- 문항 순서 ---------- */
   var FLAT = [];
   BOOKS.forEach(function (b, bi) {
     for (var n = 1; n <= b.printed; n++) {
@@ -54,14 +58,17 @@
   var BOOK_START = [];
   BOOKS.reduce(function (acc, b, i) { BOOK_START[i] = acc; return acc + b.printed; }, 0);
 
-  /* ---------- 회독 수별 계획 ---------- */
+  /* ---------- 회독 수별 기본 계획 ---------- */
   var PLAN_CACHE = {};
-  function planFor(N) {
+  function planBase(N, incSun) {
     N = Math.max(1, Math.min(MAXR, Number(N) || DEFR));
-    if (PLAN_CACHE[N]) return PLAN_CACHE[N];
+    incSun = !!incSun;
+    var key = N + (incSun ? 's' : 'w');
+    if (PLAN_CACHE[key]) return PLAN_CACHE[key];
 
-    var dayBase = Math.floor(STUDY_DATES.length / N);
-    var dayRem = STUDY_DATES.length % N;
+    var dates = incSun ? DATES_SUN : DATES_WEEK;
+    var dayBase = Math.floor(dates.length / N);
+    var dayRem = dates.length % N;
     var days = [], rounds = [], cursor = 0, gid = 0;
 
     for (var r = 1; r <= N; r++) {
@@ -100,7 +107,7 @@
             segs.push({ b: x.b, s: x.n, e: x.n, n: x.del ? 0 : 1, del: x.del ? [x.n] : [] });
           }
         }
-        var date = STUDY_DATES[cursor++];
+        var date = dates[cursor++];
         var day = {
           id: ++gid, date: date, dow: parse(date).getDay(),
           round: r, rday: i + 1,
@@ -115,18 +122,17 @@
       rounds.push({ no: r, start: first.date, end: last.date, days: cnt, questions: qsum });
     }
 
-    var byDate = {}, byId = {};
-    days.forEach(function (d) { byDate[d.date] = d; byId[d.id] = d; });
-
-    // [회독-1][책index] = [{day, seg}]
-    var segs = [];
-    for (var ri = 0; ri < N; ri++) segs.push(BOOKS.map(function () { return []; }));
+    var plan = {
+      n: N, includeSun: incSun, dates: dates.slice(),
+      days: days, rounds: rounds, byDate: {}, byId: {}, segs: []
+    };
+    days.forEach(function (d) { plan.byDate[d.date] = d; plan.byId[d.id] = d; });
+    for (var ri = 0; ri < N; ri++) plan.segs.push(BOOKS.map(function () { return []; }));
     days.forEach(function (d) {
-      d.segs.forEach(function (s) { segs[d.round - 1][s.b].push({ day: d, seg: s }); });
+      d.segs.forEach(function (s) { plan.segs[d.round - 1][s.b].push({ day: d, seg: s }); });
     });
 
-    var plan = { n: N, days: days, rounds: rounds, byDate: byDate, byId: byId, segs: segs };
-    PLAN_CACHE[N] = plan;
+    PLAN_CACHE[key] = plan;
     return plan;
   }
 
@@ -145,27 +151,131 @@
       var raw = localStorage.getItem(KEY);
       if (raw) {
         var o = JSON.parse(raw);
-        return { v: 2, target: clampTarget(o.target), checks: (o && o.checks && typeof o.checks === 'object') ? o.checks : {} };
+        return {
+          v: 3,
+          target: clampTarget(o && o.target),
+          includeSun: (o && typeof o.includeSun === 'boolean') ? o.includeSun : true,
+          checks: (o && o.checks && typeof o.checks === 'object') ? o.checks : {},
+          reb: sanitizeReb(o && o.reb, clampTarget(o && o.target))
+        };
       }
       var old = localStorage.getItem(OLD_KEY);
       if (old) {
-        var oo = JSON.parse(old), p3 = planFor(3), ch = {};
+        // 1.x: Day 번호로 저장했던 기록 → 320일(주일 제외) 3회독 일정의 날짜로 옮긴다
+        var oo = JSON.parse(old), p3 = planBase(3, false), ch = {};
         Object.keys(oo.checks || {}).forEach(function (k) {
           var dd = p3.byId[Number(k)];
           if (dd) ch[dd.date] = oo.checks[k];
         });
-        return { v: 2, target: 3, checks: ch };
+        return { v: 3, target: 3, includeSun: true, checks: ch, reb: null };
       }
     } catch (e) { storageOK = false; }
-    return { v: 2, target: DEFR, checks: {} };
+    return { v: 3, target: DEFR, includeSun: true, checks: {}, reb: null };
   }
   function persist() {
-    try { localStorage.setItem(KEY, JSON.stringify({ v: 2, target: target, checks: store.checks })); }
-    catch (e) { storageOK = false; }
+    try {
+      localStorage.setItem(KEY, JSON.stringify({
+        v: 3, target: target, includeSun: store.includeSun, checks: store.checks, reb: store.reb
+      }));
+    } catch (e) { storageOK = false; }
   }
 
+  /* ---------- '오늘부터 다시 맞추기' 기록 ---------- */
+  function sanitizeSegs(raw) {
+    if (!Array.isArray(raw)) return [];
+    var out = [];
+    raw.forEach(function (s) {
+      if (!s || typeof s !== 'object') return;
+      var b = Number(s.b);
+      if (!(b >= 0 && b < BOOKS.length)) return;
+      var printed = BOOKS[b].printed;
+      var st = clampInt(s.s, 1, printed), en = clampInt(s.e, 1, printed);
+      if (en < st) return;
+      var del = Array.isArray(s.del) ? s.del.map(function (n) { return Number(n); }) : [];
+      var delIn = del.filter(function (n) { return n >= st && n <= en; });
+      out.push({ b: b, s: st, e: en, n: Math.max(0, en - st + 1 - delIn.length), del: delIn });
+    });
+    return out;
+  }
+  function sanitizeReb(raw, n) {
+    if (!raw || typeof raw !== 'object' || !isIso(raw.from)) return null;
+    if (!Array.isArray(raw.days) || !raw.days.length) return null;
+    var days = [];
+    for (var i = 0; i < raw.days.length; i++) {
+      var x = raw.days[i];
+      if (!x || !isIso(x.date) || x.date < raw.from) return null;
+      var segs = sanitizeSegs(x.segs);
+      var q = segs.reduce(function (a, s) { return a + s.n; }, 0);
+      if (!q) continue;
+      days.push({ date: x.date, round: clampInt(x.round, 1, n), rday: 0, q: q, segs: segs });
+    }
+    if (!days.length) return null;
+    return {
+      from: raw.from,
+      createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
+      items: Math.max(0, Number(raw.items) || 0),
+      dayCount: days.length,
+      days: days
+    };
+  }
+
+  /* ---------- 오늘의 계획 (기본 + 다시 맞추기) ---------- */
   var target = clampTarget(store.target);
-  var P = planFor(target);
+  var P = buildPlan();
+
+  function buildPlan() {
+    var base = planBase(target, store.includeSun);
+    return store.reb ? withRebalance(base, store.reb) : base;
+  }
+  function replan() { P = buildPlan(); }
+
+  function withRebalance(base, reb) {
+    var days = [];
+    base.days.forEach(function (d) {
+      if (d.date >= reb.from) return;
+      if (isDone(d.date)) {
+        days.push({ id: 0, date: d.date, dow: d.dow, round: d.round, rday: 0, q: d.q, segs: d.segs });
+        return;
+      }
+      // 다시 맞추기로 넘어간 지난 날 — 분량은 앞으로 옮겼으므로 빈 날로 둔다
+      days.push({ id: 0, date: d.date, dow: d.dow, round: d.round, rday: 0, q: 0, segs: [], skip: true });
+    });
+    reb.days.forEach(function (x) {
+      var segs = x.segs.map(function (s) {
+        return { b: s.b, s: s.s, e: s.e, n: s.n, del: (s.del || []).slice() };
+      });
+      days.push({ id: 0, date: x.date, dow: parse(x.date).getDay(), round: x.round, rday: 0,
+        q: segs.reduce(function (a, s) { return a + s.n; }, 0), segs: segs });
+    });
+    days.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    days.forEach(function (d, i) { d.id = i + 1; });
+
+    var rounds = [], rc = {};
+    for (var r = 1; r <= base.n; r++) { rc[r] = 0; rounds.push({ no: r, start: '', end: '', days: 0, questions: 0 }); }
+    days.forEach(function (d) {
+      var x = rounds[d.round - 1];
+      if (!x) return;
+      d.rday = ++rc[d.round];
+      if (d.skip) return;
+      if (!x.start) x.start = d.date;
+      x.end = d.date;
+      x.days++;
+      x.questions += d.q;
+    });
+
+    var plan = {
+      n: base.n, includeSun: base.includeSun, dates: base.dates,
+      days: days, rounds: rounds, byDate: {}, byId: {}, segs: []
+    };
+    days.forEach(function (d) { plan.byDate[d.date] = d; plan.byId[d.id] = d; });
+    for (var ri = 0; ri < base.n; ri++) plan.segs.push(BOOKS.map(function () { return []; }));
+    days.forEach(function (d) {
+      if (d.skip) return;
+      d.segs.forEach(function (s) { plan.segs[d.round - 1][s.b].push({ day: d, seg: s }); });
+    });
+    return plan;
+  }
+
   function isDone(date) { return !!store.checks[date]; }
 
   /* ---------- 계산 ---------- */
@@ -180,8 +290,12 @@
     }
     return { done: done, total: total, doneDays: doneDays, days: studyDays, pct: total ? done / total * 100 : 0 };
   }
-  function roundDays(no) { return P.days.filter(function (d) { return d.round === no; }); }
-  function roundOfDate(iso) { return P.byDate[iso] ? P.byDate[iso].round : (iso < META.start ? 1 : P.n); }
+  function roundDays(no) { return P.days.filter(function (d) { return d.round === no && !d.skip; }); }
+  function roundOfDate(iso) {
+    if (P.byDate[iso] && !P.byDate[iso].skip) return P.byDate[iso].round;
+    if (iso < META.start) return 1;
+    return P.n;
+  }
   // 이번 주 7칸: 일요일(주일) 시작 ~ 토요일 끝. 캘린더 탭(일~토)과 같은 주 경계를 쓴다.
   function weekOf(iso) {
     var t = parse(iso);
@@ -197,12 +311,14 @@
   function overdueDays() {
     var n = 0;
     for (var i = 0; i < P.days.length; i++) {
-      if (P.days[i].date < TODAY && !isDone(P.days[i].date)) n++;
+      var d = P.days[i];
+      if (d.skip || isDone(d.date)) continue;
+      if (d.date < TODAY) n++;
     }
     return n;
   }
   function nextStudyDay(iso) {
-    for (var i = 0; i < P.days.length; i++) if (P.days[i].date > iso) return P.days[i];
+    for (var i = 0; i < P.days.length; i++) if (P.days[i].date > iso && !P.days[i].skip) return P.days[i];
     return null;
   }
   function fmtPct(v) {
@@ -210,9 +326,10 @@
     if (v >= 100) return '100%';
     return v.toFixed(1).replace(/\.0$/, '') + '%';
   }
-  function perDayLabel(n) {
-    var p = planFor(n);
-    return '약 ' + Math.round(PRINTED / p.rounds[0].days) + '문항';
+  function perDayOf(days) { return days ? '약 ' + Math.round(PRINTED / days) + '문항' : '-'; }
+  function perDayLabel(n) { return perDayOf(planBase(n, store.includeSun).rounds[0].days); }
+  function studyDayLabel() {
+    return P.dates.length + '일 (' + (store.includeSun ? '주일 포함' : '주일 제외') + ')';
   }
 
   /* ---------- 조각 ---------- */
@@ -274,11 +391,26 @@
       '<div class="divider"></div>' +
       metric('이번 주', '', wk, ['완료 ' + wk.doneDays + '일 / ' + wk.days + '일',
         wk.days ? nf(wk.done) + ' / ' + nf(wk.total) + '문항' : '학습일이 없어요']) +
-      (late > 0 ? '<div class="divider"></div><div class="row"><span class="muted">아직 체크하지 않은 지난 학습일</span>' +
-        '<span class="pill red">' + late + '일</span></div>' : '') +
       '</section>';
 
-    if (day) {
+    if (late > 0 || store.reb) {
+      h += '<section class="card">' +
+        '<div class="row"><div class="study-top"><div class="study-badge">↻</div>' +
+        '<div><p class="muted">일정 조정</p><div class="h2" style="margin-top:2px">' +
+        (store.reb ? '다시 맞춘 계획' : '진도가 밀렸어요') + '</div></div></div>' +
+        (store.reb ? '<span class="pill blue">' + md(store.reb.from) + '부터</span>'
+          : '<span class="pill red">' + late + '일</span>') +
+        '</div>' +
+        '<p class="muted" style="margin-top:12px">' + (store.reb
+          ? '남은 분량을 ' + store.reb.dayCount + '일에 나눠 담았어요. 완료한 기록은 그대로예요.'
+          : '지난 ' + late + '일 분량까지 오늘부터 시험 전날까지 다시 나눠요. 완료한 기록은 그대로 남아요.') +
+        '</p>' +
+        (late > 0 ? '<button class="btn" type="button" data-action="rebalance">오늘부터 다시 맞추기</button>' : '') +
+        (store.reb ? '<button class="btn ghost" type="button" data-action="undoRebalance">원래대로 되돌리기</button>' : '') +
+        '</section>';
+    }
+
+    if (day && !day.skip) {
       var done = isDone(day.date);
       h += '<section class="card' + (done ? ' soft' : '') + '">' +
         '<div class="row">' +
@@ -290,7 +422,13 @@
         '<button class="btn ' + (done ? 'ghost' : '') + '" type="button" data-action="toggle" data-date="' + day.date + '">' +
         (done ? '✓ 완료했어요 · 되돌리기' : '공부 완료로 표시') + '</button>' +
         '</section>';
-    } else if (isSun && t >= META.start && t <= META.end) {
+    } else if (day && day.skip) {
+      h += '<section class="card">' +
+        '<p class="muted">오늘의 공부</p>' +
+        '<div class="h2" style="margin-top:2px">다시 맞추며 넘어간 날</div>' +
+        '<p class="muted" style="margin-top:8px">이 날 분량은 앞으로 옮겨 담았어요. 남은 일정을 보세요.</p>' +
+        '</section>';
+    } else if (isSun && !store.includeSun && t >= META.start && t <= META.end) {
       var nx = nextStudyDay(t);
       h += '<section class="card soft">' +
         '<div class="row"><div class="study-top"><div class="study-badge">주일</div>' +
@@ -322,7 +460,8 @@
     var cells = weekOf(t).map(function (dt) {
       var iso = ymd(dt), d = P.byDate[iso], sun = dt.getDay() === 0;
       var cls = 'wcell', lab = '';
-      if (sun) { cls += ' sun'; lab = '주일'; }
+      if (sun && !store.includeSun) { cls += ' sun'; lab = '주일'; }
+      else if (d && d.skip) { lab = '–'; }
       else if (d && isDone(d.date)) { cls += ' done'; lab = '완료'; }
       else if (iso === t) { lab = '오늘'; }
       else if (d && iso < t) { cls += ' miss'; lab = '미완료'; }
@@ -338,8 +477,9 @@
 
   /* ---------- 화면: 회독 ---------- */
   function viewRounds() {
-    var r = P.rounds[state.round - 1];
+    var r = P.rounds[state.round - 1] || { no: state.round, start: '', end: '', days: 0, questions: 0 };
     var days = roundDays(state.round);
+    var rowDays = P.days.filter(function (d) { return d.round === state.round; });
     var st = statFor(days);
     var h = '';
 
@@ -347,7 +487,7 @@
       '<div class="row"><div><p class="muted">목표 회독</p>' +
       '<div class="h2" style="margin-top:2px">' + P.n + '회독</div></div>' +
       '<button type="button" class="btn ghost sm" data-action="openTarget">회독 수 변경</button></div>' +
-      '<p class="tiny" style="margin-top:10px">' + META.studyDays + '일을 ' + P.n + '번 · 회독당 ' + r.days + '일 · 하루 ' + perDayLabel(P.n) + '</p>' +
+      '<p class="tiny" style="margin-top:10px">' + studyDayLabel() + ' · 회독당 ' + r.days + '일 · 하루 ' + perDayOf(r.days) + '</p>' +
       '</section>';
 
     h += '<div class="chips">' + P.rounds.map(function (x) {
@@ -356,7 +496,8 @@
     }).join('') + '</div>';
 
     h += '<section class="card" style="margin-top:8px">' +
-      '<div class="row"><span class="range-line">' + r.start.replace(/-/g, '.') + ' ~ ' + r.end.replace(/-/g, '.') + '</span>' +
+      '<div class="row"><span class="range-line">' +
+      (r.start ? r.start.replace(/-/g, '.') + ' ~ ' + r.end.replace(/-/g, '.') : '남은 일정 없음') + '</span>' +
       '<span class="pill gray">' + st.days + '일</span></div>' +
       '<div class="metric" style="margin-top:14px">' +
       '<div class="lab"><span class="name">' + state.round + '회독 진행률</span>' +
@@ -375,13 +516,13 @@
 
     if (state.mode === 'date') {
       var cur = '', list = '';
-      days.forEach(function (d) {
+      rowDays.forEach(function (d) {
         var mk = d.date.slice(0, 7);
         if (mk !== cur) {
           if (list) h += list + '</div>';
           cur = mk;
           var my = Number(mk.slice(0, 4)), mm = Number(mk.slice(5, 7));
-          var mdays = days.filter(function (x) { return x.date.slice(0, 7) === mk; });
+          var mdays = rowDays.filter(function (x) { return x.date.slice(0, 7) === mk; });
           var mst = statFor(mdays);
           h += '<div class="section-title">' + my + '년 ' + mm + '월' +
             '<span class="muted" style="font-weight:700;font-size:12px;margin-left:6px">' +
@@ -389,6 +530,13 @@
           list = '<div class="list">';
         }
         var done = isDone(d.date);
+        if (d.skip) {
+          list += '<div class="item skip" data-date="' + d.date + '">' +
+            '<span class="grow"><span class="t1">Day ' + d.id + '<span class="d">' + md(d.date) + '</span></span>' +
+            '<span class="t2">다시 맞추며 앞으로 옮긴 날</span></span>' +
+            '<span class="qcount">–</span></div>';
+          return;
+        }
         list += '<button type="button" class="item' + (done ? ' done' : '') + '" data-action="toggle" data-date="' + d.date + '">' +
           '<span class="chk">' + CHK + '</span>' +
           '<span class="grow"><span class="t1">Day ' + d.id + '<span class="d">' + md(d.date) + '</span>' +
@@ -470,14 +618,15 @@
       var day = P.byDate[iso];
       var sun = dt.getDay() === 0;
       var cls = 'cell', lab = '';
-      if (sun) { cls += ' sun'; lab = '주일'; }
+      if (sun && !store.includeSun) { cls += ' sun'; lab = '주일'; }
+      else if (day && day.skip) { cls += ' off'; lab = '–'; }
       else if (day && isDone(day.date)) { cls += ' done'; lab = '완료'; }
       else if (day && iso < TODAY) { cls += ' miss'; lab = '미완료'; }
       else if (day) { cls += ' plan'; }
       if (iso === TODAY) cls += ' today';
       if (state.sel === iso) cls += ' sel';
       h += '<button type="button" class="' + cls + '" data-action="calSelect" data-date="' + iso + '"' +
-        ' aria-label="' + iso + (day ? ' ' + day.round + '회독 Day ' + day.id : '') + '">' +
+        ' aria-label="' + iso + (day && !day.skip ? ' ' + day.round + '회독 Day ' + day.id : '') + '">' +
         '<span class="cn">' + dn + '</span><span class="cs">' + lab + '</span></button>';
     }
     h += '</div>' +
@@ -485,7 +634,7 @@
       '<span><i style="background:var(--pri)"></i>완료</span>' +
       '<span><i style="background:var(--red-soft);box-shadow:inset 0 0 0 1px var(--red)"></i>미완료</span>' +
       '<span><i style="background:#fff;box-shadow:inset 0 0 0 2px var(--pri)"></i>오늘</span>' +
-      '<span><i style="background:#FAFBFC;box-shadow:inset 0 0 0 1px var(--line)"></i>주일 휴식</span>' +
+      (store.includeSun ? '' : '<span><i style="background:#FAFBFC;box-shadow:inset 0 0 0 1px var(--line)"></i>주일 휴식</span>') +
       '</div></section>';
 
     if (!state.sel) state.sel = TODAY;
@@ -493,7 +642,7 @@
     var sday = P.byDate[sel];
     var ssun = parse(sel).getDay() === 0;
     h += '<section class="card" style="margin-top:12px">';
-    if (sday) {
+    if (sday && !sday.skip) {
       var done = isDone(sday.date);
       h += '<div class="row"><div class="grow"><p class="muted">' + sday.round + '회독 · Day ' + sday.id + '</p>' +
         '<div class="h2" style="margin-top:2px">' + longKo(sel) + '</div></div>' +
@@ -501,7 +650,12 @@
         '<div class="seg-list">' + segsHtml(sday) + '</div>' +
         '<button class="btn ' + (done ? 'ghost' : '') + '" type="button" data-action="toggle" data-date="' + sday.date + '">' +
         (done ? '✓ 완료했어요 · 되돌리기' : '공부 완료로 표시') + '</button>';
-    } else if (ssun) {
+    } else if (sday && sday.skip) {
+      h += '<div class="row"><div class="grow"><p class="muted">' + sday.round + '회독</p>' +
+        '<div class="h2" style="margin-top:2px">' + longKo(sel) + '</div></div>' +
+        '<span class="pill gray">넘어감</span></div>' +
+        '<p class="muted" style="margin-top:10px">일정을 다시 맞추면서 이 날 분량을 앞으로 옮겼어요.</p>';
+    } else if (ssun && !store.includeSun) {
       var nx2 = nextStudyDay(sel);
       h += '<div class="row"><div class="grow"><p class="muted">주일</p>' +
         '<div class="h2" style="margin-top:2px">' + longKo(sel) + '</div></div>' +
@@ -522,8 +676,8 @@
     var all = statFor(P.days);
     var last = null;
     Object.keys(store.checks).forEach(function (k) {
-      var t = Number(store.checks[k]) || 0;
-      if (!last || t > last) last = t;
+      var v = Number(store.checks[k]) || 0;
+      if (!last || v > last) last = v;
     });
     var h = '';
 
@@ -542,8 +696,27 @@
       '<button type="button" class="item" data-action="openTarget"><span class="grow">' +
       '<span class="t1">목표 회독</span><span class="t2">1회독부터 ' + MAXR + '회독까지 고를 수 있어요</span></span>' +
       '<span class="v" style="font-weight:800;color:var(--pri)">' + P.n + '회독 ›</span></button>' +
-      '<div class="info-row"><span class="k">회독당</span><span class="v">' + P.rounds[0].days + '일 · 하루 ' + perDayLabel(P.n) + '</span></div>' +
+      '<button type="button" class="item" data-action="toggleSun" role="switch" aria-checked="' + (store.includeSun ? 'true' : 'false') + '">' +
+      '<span class="grow"><span class="t1">주일에도 공부하기</span>' +
+      '<span class="t2">일요일도 학습일에 넣어요 · 주일 포함 ' + DATES_SUN.length + '일 · 제외 ' + DATES_WEEK.length + '일</span></span>' +
+      '<span class="sw' + (store.includeSun ? ' on' : '') + '"><i></i></span></button>' +
+      '<div class="info-row"><span class="k">회독당</span><span class="v">' + P.rounds[0].days + '일 · 하루 ' + perDayOf(P.rounds[0].days) + '</span></div>' +
       '<div class="info-row"><span class="k">1회독 범위</span><span class="v">' + META.books + '권 ' + nf(META.printedQuestions) + '문항</span></div>' +
+      '</div>';
+
+    h += '<div class="section-title">일정 조정</div><div class="list">' +
+      '<button type="button" class="item" data-action="rebalance"><span class="grow">' +
+      '<span class="t1">오늘부터 다시 맞추기</span>' +
+      '<span class="t2">밀린 분량까지 오늘부터 시험 전날까지 다시 나눠요</span></span>' +
+      '<span class="chev">›</span></button>' +
+      (store.reb
+        ? '<button type="button" class="item" data-action="undoRebalance"><span class="grow">' +
+          '<span class="t1">원래대로 되돌리기</span>' +
+          '<span class="t2">다시 맞추기 전 계획으로 돌아가요</span></span>' +
+          '<span class="chev">›</span></button>' +
+          '<div class="info-row"><span class="k">다시 맞춘 날</span><span class="v">' +
+          store.reb.from.replace(/-/g, '.') + '부터 ' + store.reb.dayCount + '일</span></div>'
+        : '<div class="info-row"><span class="k">지난 미완료</span><span class="v">' + overdueDays() + '일</span></div>') +
       '</div>';
 
     h += '<div class="section-title">곧 추가될 탭</div><div class="list">' +
@@ -567,10 +740,10 @@
 
     h += '<div class="section-title">학습 정보</div><div class="list">' +
       '<div class="info-row"><span class="k">공부 기간</span><span class="v">' + META.start.replace(/-/g, '.') + ' ~ ' + META.end.replace(/-/g, '.') + '</span></div>' +
-      '<div class="info-row"><span class="k">학습일</span><span class="v">' + META.studyDays + '일 (주일 제외)</span></div>' +
+      '<div class="info-row"><span class="k">학습일</span><span class="v">' + studyDayLabel() + '</span></div>' +
       '<div class="info-row"><span class="k">범위</span><span class="v">' + META.books + '권 ' + nf(META.printedQuestions) + '문항 × ' + P.n + '회독</span></div>' +
       '<div class="info-row"><span class="k">삭제 문항</span><span class="v" style="font-size:12.5px">' + META.deleted.join(' · ') + '</span></div>' +
-      '<div class="info-row"><span class="k">앱 버전</span><span class="v">1.2.0</span></div>' +
+      '<div class="info-row"><span class="k">앱 버전</span><span class="v">1.3.0</span></div>' +
       '</div>';
 
     h += '<div class="section-title">홈 화면에 추가</div>' +
@@ -654,6 +827,12 @@
 
   function daySheetHtml(date) {
     var d = P.byDate[date];
+    if (!d || d.skip) {
+      return '<p class="muted">' + (d ? d.round + '회독' : '') + '</p>' +
+        '<h3>' + longKo(date) + '</h3>' +
+        '<p class="muted" style="margin-top:10px">일정을 다시 맞추면서 이 날 분량을 앞으로 옮겼어요.</p>' +
+        '<button class="btn ghost" type="button" data-action="closeSheet" style="margin-top:16px">닫기</button>';
+    }
     var done = isDone(date);
     return '<p class="muted">' + d.round + '회독 · Day ' + d.id + ' / ' + P.n + '회독 계획</p>' +
       '<h3>' + longKo(date) + '</h3>' +
@@ -666,14 +845,14 @@
   function targetSheetHtml() {
     var rows = '';
     for (var n = 1; n <= MAXR; n++) {
-      var p = planFor(n);
+      var p = planBase(n, store.includeSun);
       rows += '<button type="button" class="opt' + (n === P.n ? ' on' : '') + '" data-action="setTarget" data-n="' + n + '">' +
         '<span><span class="n">' + n + '회독</span>' +
         '<span class="d">' + p.rounds[0].days + '일 · 하루 ' + perDayLabel(n) + '</span></span>' +
         '<span class="ck">' + (n === P.n ? '✓' : '') + '</span></button>';
     }
     return '<h3 style="margin-top:2px">목표 회독</h3>' +
-      '<p class="tiny" style="margin-top:4px">' + META.studyDays + '일(주일 제외)을 몇 번 나눠 풀지 골라 주세요.</p>' +
+      '<p class="tiny" style="margin-top:4px">' + studyDayLabel() + '을 몇 번 나눠 풀지 골라 주세요.</p>' +
       '<div class="opt-grid">' + rows + '</div>' +
       '<p class="tiny" style="margin-top:12px">회독 수를 바꾸면 하루 분량이 다시 나뉘어요. 이미 체크한 날짜 기록은 그대로 남아요.</p>' +
       '<button class="btn ghost" type="button" data-action="closeSheet">닫기</button>';
@@ -703,14 +882,14 @@
     toastEl.textContent = msg;
     toastEl.classList.add('on');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toastEl.classList.remove('on'); }, 1800);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('on'); }, 2200);
   }
 
   /* ---------- 백업 ---------- */
   function exportJSON() {
     var payload = {
-      app: 'jangsin-planner', version: 2, exportedAt: new Date().toISOString(),
-      target: P.n, checks: store.checks
+      app: 'jangsin-planner', version: 3, exportedAt: new Date().toISOString(),
+      target: P.n, includeSun: store.includeSun, checks: store.checks, reb: store.reb
     };
     var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     var url = URL.createObjectURL(blob);
@@ -730,9 +909,9 @@
     Object.keys(src).forEach(function (k) {
       var key = String(k);
       if (/^\d{4}-\d{2}-\d{2}$/.test(key)) {
-        if (P.byDate[key]) out[key] = Number(src[k]) || Date.now();
-      } else if (/^\d+$/.test(key)) {          // 예전 버전(3회독 Day 번호)
-        var d3 = planFor(3).byId[Number(key)];
+        out[key] = Number(src[k]) || Date.now();
+      } else if (/^\d+$/.test(key)) {          // 1.x 버전(3회독 Day 번호)
+        var d3 = planBase(3, false).byId[Number(key)];
         if (d3) out[d3.date] = Number(src[k]) || Date.now();
       }
     });
@@ -749,13 +928,17 @@
       var n = Object.keys(checks).length;
       if (!window.confirm('백업 파일의 체크 ' + n + '개로 현재 기록을 바꿀까요?')) return;
       store.checks = checks;
-      if (parsed && parsed.target) {
-        target = clampTarget(parsed.target);
-        P = planFor(target);
-        if (state.round > P.n) state.round = P.n;
-        store.target = target;
-      }
+      if (parsed && parsed.target) store.target = clampTarget(parsed.target);
+      else store.target = target;
+      if (parsed && typeof parsed.includeSun === 'boolean') store.includeSun = parsed.includeSun;
+      target = store.target;
+      store.reb = parsed ? sanitizeReb(parsed.reb, target) : null;
       persist();
+      replan();
+      state.round = roundOfDate(TODAY);
+      if (state.round > P.n) state.round = P.n;
+      state.book = -1;
+      if (!P.byDate[state.sel]) state.sel = TODAY;
       if (sheetState) renderSheet();
       render();
       toast(n + '개 기록을 불러왔어요');
@@ -763,19 +946,227 @@
     reader.readAsText(file);
   }
 
+  /* ---------- 오늘부터 다시 맞추기 ---------- */
+  function itemsOfDay(d) {
+    var out = [];
+    if (!d || d.skip) return out;
+    for (var i = 0; i < d.segs.length; i++) {
+      var s = d.segs[i];
+      var del = BOOKS[s.b].deleted || [];
+      for (var n = s.s; n <= s.e; n++) if (del.indexOf(n) < 0) out.push({ b: s.b, n: n });
+    }
+    return out;
+  }
+  function segsFromItems(items) {
+    var segs = [];
+    for (var i = 0; i < items.length; i++) {
+      var x = items[i], last = segs[segs.length - 1];
+      if (last && last.b === x.b) { last.e = x.n; last.n++; }
+      else segs.push({ b: x.b, s: x.n, e: x.n, n: 1, del: [] });
+    }
+    for (var k = 0; k < segs.length; k++) {
+      var s = segs[k], del = BOOKS[s.b].deleted || [];
+      s.del = del.filter(function (n) { return n >= s.s && n <= s.e; });
+    }
+    return segs;
+  }
+  // 남은 날 수에 맞춰 회독마다 며칠씩 줄지 고르게 나눈다(각 회독 최소 1일 · 남은 문항 수를 넘지 않게)
+  function allocDays(weights, D) {
+    var sum = weights.reduce(function (a, b) { return a + b; }, 0);
+    var n = weights.length;
+    if (!sum || !n) return [];
+    D = Math.min(D, sum); // 남은 문항 수보다 많은 날을 주지 않는다
+    var base = weights.map(function (w) { return Math.max(1, Math.floor(D * w / sum)); });
+    var rem = weights.map(function (w, i) { return D * w / sum - base[i]; });
+    var tot = base.reduce(function (a, b) { return a + b; }, 0);
+    while (tot > D) {
+      var idx = -1;
+      for (var i = 0; i < n; i++) if (base[i] > 1 && (idx < 0 || base[i] > base[idx])) idx = i;
+      if (idx < 0) break;
+      base[idx]--; tot--;
+    }
+    while (tot < D) {
+      var j = 0;
+      for (var k = 1; k < n; k++) if (rem[k] > rem[j]) j = k;
+      base[j]++; rem[j] -= 1; tot++;
+    }
+    // 한 회독이 남은 문항보다 많은 날을 받지 않도록 넘치는 날은 다른 회독으로 넘긴다
+    var surplus = 0;
+    for (var a = 0; a < n; a++) {
+      if (base[a] > weights[a]) { surplus += base[a] - weights[a]; base[a] = weights[a]; }
+    }
+    while (surplus > 0) {
+      var moved = false;
+      for (var b = 0; b < n && surplus > 0; b++) {
+        if (base[b] < weights[b]) { base[b]++; surplus--; moved = true; }
+      }
+      if (!moved) break;
+    }
+    return base;
+  }
+  // 한 회독의 남은 문항을 남은 날에 나눌 때의 끝 위치(책 경계에 가까우면 맞춘다)
+  function splitEnds(list, cnt) {
+    var N = list.length, pos = 0, ends = [], left = cnt;
+    for (var i = 0; i < cnt; i++) {
+      left--;
+      var rest = N - pos;
+      var k = left === 0 ? rest : Math.round(rest / (left + 1));
+      if (k < 1) k = 1;
+      if (rest - k < left) k = rest - left;
+      if (k < 1) k = 1;
+      var cut = pos + k;
+      if (i < cnt - 1 && cut > pos && cut < N) {
+        var b = list[cut - 1].b, bEnd = cut, bStart = cut;
+        while (bEnd < N && list[bEnd].b === b) bEnd++;
+        while (bStart > pos && list[bStart - 1].b === b) bStart--;
+        if (bEnd - cut <= 2 && N - bEnd >= left) cut = bEnd;
+        else if (cut - bStart <= 2 && bStart - pos >= 1) cut = bStart;
+      }
+      if (cut <= pos) cut = pos + 1;
+      if (N - cut < left) cut = N - left;
+      if (cut > N) cut = N;
+      ends.push(cut);
+      pos = cut;
+    }
+    return ends;
+  }
+  // 오늘(또는 오늘 이후 처음 미완료한 날)부터가 다시 맞출 구간
+  function rebalanceFrom() {
+    for (var i = 0; i < P.days.length; i++) {
+      var d = P.days[i];
+      if (d.date < TODAY) continue;
+      if (d.skip || isDone(d.date)) continue;
+      return d.date;
+    }
+    return null;
+  }
+  function doRebalance() {
+    var from = rebalanceFrom();
+    if (!from) { toast('다시 맞출 남은 일정이 없어요'); return; }
+    var dates = [];
+    P.days.forEach(function (d) { if (d.date >= from) dates.push(d.date); });
+    if (!dates.length) { toast('남은 학습일이 없어요'); return; }
+
+    var lists = [], missed = 0;
+    for (var r = 1; r <= P.n; r++) {
+      var arr = [];
+      for (var i = 0; i < P.days.length; i++) {
+        var d = P.days[i];
+        if (d.round !== r || d.skip || isDone(d.date)) continue;
+        if (d.date < from) missed += d.q;
+        var it = itemsOfDay(d);
+        for (var k = 0; k < it.length; k++) arr.push(it[k]);
+      }
+      lists.push(arr);
+    }
+    var total = lists.reduce(function (a, l) { return a + l.length; }, 0);
+    if (!total) { toast('밀린 분량이 없어요'); return; }
+
+    var active = [];
+    lists.forEach(function (l, i) { if (l.length) active.push({ r: i + 1, list: l }); });
+
+    var D = dates.length;
+    var outDays = [];
+
+    if (D >= active.length) {
+      var alloc = allocDays(active.map(function (x) { return x.list.length; }), D);
+      var di = 0;
+      for (var ai = 0; ai < active.length; ai++) {
+        var cnt = alloc[ai];
+        var ends = splitEnds(active[ai].list, cnt);
+        var pos = 0;
+        for (var j = 0; j < cnt; j++) {
+          var items = active[ai].list.slice(pos, ends[j]);
+          pos = ends[j];
+          var segs = segsFromItems(items);
+          outDays.push({
+            date: dates[di++], round: active[ai].r, rday: j + 1,
+            q: segs.reduce(function (a, s) { return a + s.n; }, 0), segs: segs
+          });
+        }
+      }
+    } else {
+      // 남은 날이 남은 회독 수보다 적은 마지막 구간: 남은 문항을 한 줄로 이어 담는다
+      var all = [];
+      active.forEach(function (x) { x.list.forEach(function (it) { all.push({ b: it.b, n: it.n, r: x.r }); }); });
+      var useD = Math.min(D, all.length);
+      var endsAll = splitEnds(all, useD);
+      var posAll = 0;
+      for (var q = 0; q < useD; q++) {
+        var chunk = all.slice(posAll, endsAll[q]); posAll = endsAll[q];
+        var sg = segsFromItems(chunk.map(function (x) { return { b: x.b, n: x.n }; }));
+        outDays.push({
+          date: dates[q], round: chunk[0].r, rday: q + 1,
+          q: sg.reduce(function (a, s) { return a + s.n; }, 0), segs: sg
+        });
+      }
+    }
+
+    store.reb = sanitizeReb({
+      from: from, createdAt: new Date().toISOString(), items: total, days: outDays
+    }, P.n);
+    if (!store.reb) { toast('일정을 다시 맞추지 못했어요'); return; }
+
+    persist();
+    replan();
+    state.round = roundOfDate(TODAY);
+    if (state.round > P.n) state.round = P.n;
+    state.book = -1;
+    if (!P.byDate[state.sel]) state.sel = TODAY;
+    render();
+    if (sheetState) renderSheet();
+    toast('남은 ' + nf(total) + '문항' + (missed ? '(밀린 ' + nf(missed) + '문항 포함)' : '') +
+      '을 ' + outDays.length + '일에 다시 나눴어요 · 하루 약 ' + Math.round(total / outDays.length) + '문항');
+  }
+
+  function undoRebalance() {
+    if (!store.reb) { toast('되돌릴 다시 맞추기가 없어요'); return; }
+    store.reb = null;
+    persist();
+    replan();
+    state.round = roundOfDate(TODAY);
+    if (state.round > P.n) state.round = P.n;
+    state.book = -1;
+    if (!P.byDate[state.sel]) state.sel = TODAY;
+    render();
+    if (sheetState) renderSheet();
+    toast('원래 일정으로 되돌렸어요');
+  }
+
+  function setIncludeSun(on) {
+    if (store.includeSun === on) return;
+    var hadReb = !!store.reb;
+    store.includeSun = on;
+    store.reb = null;
+    persist();
+    replan();
+    state.round = roundOfDate(TODAY);
+    if (state.round > P.n) state.round = P.n;
+    state.book = -1;
+    if (!P.byDate[state.sel]) state.sel = TODAY;
+    render();
+    if (sheetState) renderSheet();
+    toast((on ? '주일도 공부일에 넣었어요 · ' + P.dates.length + '일'
+      : '주일을 뺐어요 · ' + P.dates.length + '일') + (hadReb ? ' · 다시 맞추기는 해제됐어요' : ''));
+  }
+
   /* ---------- 이벤트 ---------- */
   function applyTarget(n) {
-    target = clampTarget(n);
-    P = planFor(target);
+    n = clampTarget(n);
+    if (n === target) { closeSheet(); return; }
+    var hadReb = !!store.reb;
+    target = n;
     store.target = target;
+    store.reb = null;
     persist();
+    replan();
     state.round = roundOfDate(TODAY);
     if (state.round > P.n) state.round = P.n;
     state.book = -1;
     if (!P.byDate[state.sel]) state.sel = TODAY;
     render();
     if (sheetState && sheetState.type === 'target') renderSheet();
-    toast(target + '회독으로 바꿨어요');
+    toast(target + '회독으로 바꿨어요' + (hadReb ? ' · 다시 맞추기는 해제됐어요' : ''));
   }
 
   document.addEventListener('click', function (e) {
@@ -791,7 +1182,7 @@
     if (a === 'toggle') {
       e.preventDefault();
       var date = el.dataset.date;
-      if (!P.byDate[date]) return;
+      if (!P.byDate[date] || P.byDate[date].skip) return;
       if (isDone(date)) { delete store.checks[date]; toast('완료를 취소했어요'); }
       else { store.checks[date] = Date.now(); toast('완료! 진행률이 올라갔어요'); }
       persist();
@@ -810,6 +1201,9 @@
     if (a === 'openTarget') { openSheet({ type: 'target' }); return; }
     if (a === 'setTarget') { applyTarget(Number(el.dataset.n)); return; }
     if (a === 'openDay') { openSheet({ type: 'day', date: el.dataset.date }); return; }
+    if (a === 'toggleSun') { setIncludeSun(!store.includeSun); return; }
+    if (a === 'rebalance') { doRebalance(); return; }
+    if (a === 'undoRebalance') { undoRebalance(); return; }
     if (a === 'calPrev' || a === 'calNext') {
       var y = state.cal.y, m = state.cal.m + (a === 'calNext' ? 1 : -1);
       if (m < 1) { m = 12; y--; }
