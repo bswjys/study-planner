@@ -15,7 +15,10 @@ import http.server
 import json
 import os
 import socketserver
+import tempfile
 import threading
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from playwright.sync_api import sync_playwright
 
@@ -46,6 +49,11 @@ PORT = httpd.server_address[1]
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
 BASE = 'http://127.0.0.1:%d/' % PORT
 KEY = 'jangsin-planner-v2'
+KST = ZoneInfo('Asia/Seoul')
+
+
+def ts(y, m, d):
+    return int(datetime(y, m, d, 9, 30, tzinfo=KST).timestamp() * 1000)
 TOTAL_Q = 9018   # 3,006문항 × 3회독
 
 
@@ -133,7 +141,7 @@ with sync_playwright() as p:
     # =========================================================
     # A. 기존 사용자 기록 + 주일 포함 계획 (373일)
     # =========================================================
-    seed = {'v': 2, 'target': 3, 'checks': {'2026-11-23': 1763800000000}}
+    seed = {'v': 2, 'target': 3, 'checks': {'2026-11-23': ts(2026, 11, 23)}}
     ctx, pg = new_page(browser)
     open_app(pg, seed, '2026-11-24')
     txt = pg.inner_text('main')
@@ -215,7 +223,7 @@ with sync_playwright() as p:
     reb = st['reb']
     check('재조정 저장 · 11/27부터', bool(reb) and reb['from'] == '2026-11-27', reb and reb['from'])
     check('재조정 일수 369일', reb['dayCount'] == 369, reb['dayCount'])
-    check('기록 유지', st['checks'] == {'2026-11-23': 1763800000000}, st['checks'])
+    check('기록 유지', st['checks'] == {'2026-11-23': ts(2026, 11, 23)}, st['checks'])
     check('남은 문항 = 9,018 - Day1', reb['items'] == TOTAL_Q - q_day1, (reb['items'], q_day1))
     check('재조정 합계 = 남은 문항', sum(d['q'] for d in reb['days']) == TOTAL_Q - q_day1,
           sum(d['q'] for d in reb['days']))
@@ -251,7 +259,7 @@ with sync_playwright() as p:
     check('새로고침 후 재조정 유지', bool(store(pg).get('reb')))
     today_txt = pg.inner_text('main')
     check('새로고침 후 오늘 카드', 'Day 5' in today_txt, today_txt[:600])
-    check('새로고침 후 완료 기록 유지', store(pg)['checks'] == {'2026-11-23': 1763800000000})
+    check('새로고침 후 완료 기록 유지', store(pg)['checks'] == {'2026-11-23': ts(2026, 11, 23)})
 
     # 되돌리기
     pg.click('main [data-action="undoRebalance"]')
@@ -261,13 +269,13 @@ with sync_playwright() as p:
     check('되돌리면 밀린 날 3일', '진도가 밀렸어요' in pg.inner_text('main'))
     items = all_items(pg, 3)
     check('되돌리면 373일', len([x for x in items if not x['skip']]) == 373, len(items))
-    check('되돌려도 기록 유지', store(pg)['checks'] == {'2026-11-23': 1763800000000})
+    check('되돌려도 기록 유지', store(pg)['checks'] == {'2026-11-23': ts(2026, 11, 23)})
     check('C 콘솔 오류 0건', len(pg.errors) == 0, pg.errors)
 
     # =========================================================
     # D. 오늘 이미 완료 → 다음 날부터 재조정 + 스크린샷
     # =========================================================
-    seed3 = {'v': 2, 'target': 3, 'checks': {'2026-11-23': 1763800000000, '2026-11-24': 1763900000000}}
+    seed3 = {'v': 2, 'target': 3, 'checks': {'2026-11-23': ts(2026, 11, 23), '2026-11-24': ts(2026, 11, 24)}}
     open_app(pg, seed3, '2026-11-24')
     tab(pg, 'more')
     pg.click('main [data-action="rebalance"]')
@@ -278,7 +286,7 @@ with sync_playwright() as p:
     check('오늘 완료면 11/25부터', bool(reb) and reb['from'] == '2026-11-25', reb and reb['from'])
     check('오늘 완료면 371일', reb and reb['dayCount'] == 371, reb and reb['dayCount'])
     check('오늘 완료면 시작일 이전 기록 불변',
-          store(pg)['checks'] == {'2026-11-23': 1763800000000, '2026-11-24': 1763900000000})
+          store(pg)['checks'] == {'2026-11-23': ts(2026, 11, 23), '2026-11-24': ts(2026, 11, 24)})
     pg.wait_for_timeout(2000)
     pg.screenshot(path=os.path.join(SHOTS, 'planner-rebalance-390.png'))
     pg.screenshot(path=os.path.join(SHOTS, 'planner-rebalance-390-full.png'), full_page=True)
@@ -315,10 +323,10 @@ with sync_playwright() as p:
     ctx.close()
     ctx, pg = new_page(browser)
     pg.goto(BASE + 'index.html', wait_until='domcontentloaded')
-    pg.evaluate("""() => {
+    pg.evaluate("""([a, b]) => {
       localStorage.clear();
-      localStorage.setItem('jangsin-planner-v1', JSON.stringify({v:1, target:3, checks:{'1': 1763800000000, '2': 1763900000000}}));
-    }""")
+      localStorage.setItem('jangsin-planner-v1', JSON.stringify({v:1, target:3, checks:{'1': a, '2': b}}));
+    }""", [ts(2026, 11, 23), ts(2026, 11, 24)])
     pg.goto(BASE + 'index.html?today=2026-11-24', wait_until='networkidle')
     pg.wait_for_timeout(350)
     txt = pg.inner_text('main')
@@ -336,7 +344,7 @@ with sync_playwright() as p:
     before = store(pg)
     with pg.expect_download() as dl:
         pg.click('[data-action="export"]')
-    path = os.path.join(ROOT, 'shots', 'backup-test.json')
+    path = os.path.join(tempfile.mkdtemp(), 'backup-test.json')
     dl.value.save_as(path)
     payload = json.load(open(path))
     check('백업에 includeSun·reb 포함', payload.get('includeSun') is True and bool(payload.get('reb')),
