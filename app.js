@@ -439,7 +439,8 @@
         '<div><p class="muted">일정 조정</p><div class="h2" style="margin-top:2px">' + adjHead +
         '</div></div></div>' +
         (late > 0 ? '<span class="pill red">' + late + '일</span>'
-          : '<span class="pill blue">' + md(partToday ? store.reb.partialDate : store.reb.from) + '부터</span>') +
+          : '<span class="pill blue">' + md(partToday ? store.reb.partialDate : store.reb.from) +
+            (partToday ? ' 조정' : '부터') + '</span>') +
         '</div>' +
         '<p class="muted" style="margin-top:12px">' + adjDesc + '</p>' +
         (late > 0 ? '<button class="btn" type="button" data-action="rebalance">오늘부터 다시 맞추기</button>' : '') +
