@@ -1,6 +1,6 @@
 /* 장신대 플래너 — 오프라인 캐시
    온라인일 때는 항상 새 파일을 받고(업데이트 즉시 반영), 오프라인일 때만 캐시를 쓴다. */
-var CACHE = 'jangsin-planner-v4-2026-11-24a';
+var CACHE = 'jangsin-planner-v5-2026-11-24b';
 var ASSETS = [
   './',
   './index.html',

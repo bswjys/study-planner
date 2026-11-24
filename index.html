@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>장신대 플래너</title>
-<meta name="description" content="장신대 신학대학원 입학고사 3회독 공부 계획과 진도 관리">
+<meta name="description" content="장신대 신학대학원 입학고사 회독 공부 계획과 진도 관리">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -116,6 +116,21 @@ main{max-width:560px;margin:0 auto;padding:0 20px calc(84px + var(--safe-b));}
 .btn.done{background:var(--green-soft);color:#00985B}
 .btn.danger{background:var(--red-soft);color:var(--red)}
 .btn.sm{padding:9px 14px;font-size:13.5px;border-radius:11px;width:auto;margin:0}
+.btn-row{display:flex;gap:8px;margin-top:16px}
+.btn-row .btn{flex:1;min-width:0;margin-top:0;padding:15px 10px;font-size:15.5px}
+.btn-row .btn.wide{flex:1.45}
+
+/* ---------- 공부량 조정 ---------- */
+.adj-sum{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:14px 0 10px;font-size:13.5px;font-weight:800;color:var(--pri-strong);font-variant-numeric:tabular-nums}
+.linkbtn{font-size:12.5px;font-weight:800;color:var(--tx2);background:#F2F4F6;border-radius:10px;padding:7px 11px;cursor:pointer;white-space:nowrap}
+.linkbtn:active{background:#E8EBEE}
+.adj-wrap{display:flex;flex-direction:column;gap:16px}
+.adj-book-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:13.5px;font-weight:800;margin:0 2px 8px;letter-spacing:-0.02em}
+.adj-book-head span{font-size:11.5px;font-weight:700;color:var(--tx3);font-variant-numeric:tabular-nums}
+.chgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(42px,1fr));gap:6px}
+.chcell{border:0;border-radius:11px;background:#F2F4F6;color:var(--tx2);height:44px;font-size:14px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-0.02em;cursor:pointer;transition:background .12s,color .12s,transform .1s;padding:0}
+.chcell.on{background:var(--pri);color:#fff}
+.chcell:active{transform:scale(.94)}
 
 /* ---------- week strip ---------- */
 .week{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;padding:14px 10px}

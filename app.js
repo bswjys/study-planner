@@ -210,11 +210,33 @@
       days.push({ date: x.date, round: clampInt(x.round, 1, n), rday: 0, q: q, segs: segs });
     }
     if (!days.length) return null;
+    var reason = raw.reason === 'partial' ? 'partial' : 'rebalance';
+    var orig = [];
+    if (Array.isArray(raw.orig)) {
+      var seen = {};
+      raw.orig.forEach(function (it) {
+        if (!it || typeof it !== 'object') return;
+        var b = Number(it.b), q = Number(it.n);
+        if (!(b >= 0 && b < BOOKS.length)) return;
+        if (!(q >= 1 && q <= BOOKS[b].printed)) return;
+        if ((BOOKS[b].deleted || []).indexOf(q) >= 0) return;
+        var key = b + ':' + q;
+        if (seen[key]) return;
+        seen[key] = 1;
+        orig.push({ b: b, n: q });
+      });
+    }
     return {
       from: raw.from,
       createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
       items: Math.max(0, Number(raw.items) || 0),
       dayCount: days.length,
+      reason: reason,
+      partialDate: (reason === 'partial' && isIso(raw.partialDate)) ? raw.partialDate : '',
+      partialQ: Math.max(0, Number(raw.partialQ) || 0),
+      partialTotal: Math.max(0, Number(raw.partialTotal) || 0),
+      prevDone: !!raw.prevDone,
+      orig: orig,
       days: days
     };
   }
@@ -348,6 +370,14 @@
       return BOOKS[s.b].name + ' ' + pad3(s.s) + '~' + pad3(s.e) + ' (' + s.n + '문항)';
     }).join(' · ');
   }
+  // 오늘 일부만 완료해 조정한 날이면, 남은 문항이 어디로 갔는지 한 줄로 알린다
+  function partialNote(d) {
+    var r = store.reb;
+    if (!r || r.reason !== 'partial' || r.partialDate !== d.date) return '';
+    if (!(r.partialTotal > r.partialQ)) return '';
+    return '<p class="tiny" style="margin-top:12px;color:var(--tx2)">' + r.partialTotal + '문항 중 ' + r.partialQ +
+      '문항 완료 · 남은 ' + (r.partialTotal - r.partialQ) + '문항은 다음 학습일부터 다시 나눠 담았어요</p>';
+  }
   function metric(name, sub, st, extra) {
     return '<div class="metric">' +
       '<div class="lab"><span class="name">' + name + (sub ? '<span>' + sub + '</span>' : '') + '</span>' +
@@ -394,17 +424,24 @@
       '</section>';
 
     if (late > 0 || store.reb) {
+      var partToday = !!store.reb && store.reb.reason === 'partial' && store.reb.partialDate === TODAY;
+      var adjHead = late > 0 ? '진도가 밀렸어요' : (partToday ? '공부량 조정됨' : '다시 맞춘 계획');
+      var adjDesc = late > 0
+        ? '지난 ' + late + '일 분량까지 오늘부터 시험 전날까지 다시 나눠요. 완료한 기록은 그대로 남아요.'
+        : (partToday
+          ? md(store.reb.partialDate) + '에 고른 ' + store.reb.partialQ + '문항만 완료로 남기고' +
+            (store.reb.partialTotal > store.reb.partialQ
+              ? ' 남은 ' + (store.reb.partialTotal - store.reb.partialQ) + '문항은 다음 학습일부터 다시 나눠 담았어요.'
+              : ' 남은 문항 없이 전부 마쳤어요.') + ' 완료한 기록은 그대로예요.'
+          : '남은 분량을 ' + store.reb.dayCount + '일에 나눠 담았어요. 완료한 기록은 그대로예요.');
       h += '<section class="card">' +
         '<div class="row"><div class="study-top"><div class="study-badge">↻</div>' +
-        '<div><p class="muted">일정 조정</p><div class="h2" style="margin-top:2px">' +
-        (store.reb ? '다시 맞춘 계획' : '진도가 밀렸어요') + '</div></div></div>' +
-        (store.reb ? '<span class="pill blue">' + md(store.reb.from) + '부터</span>'
-          : '<span class="pill red">' + late + '일</span>') +
+        '<div><p class="muted">일정 조정</p><div class="h2" style="margin-top:2px">' + adjHead +
+        '</div></div></div>' +
+        (late > 0 ? '<span class="pill red">' + late + '일</span>'
+          : '<span class="pill blue">' + md(partToday ? store.reb.partialDate : store.reb.from) + '부터</span>') +
         '</div>' +
-        '<p class="muted" style="margin-top:12px">' + (store.reb
-          ? '남은 분량을 ' + store.reb.dayCount + '일에 나눠 담았어요. 완료한 기록은 그대로예요.'
-          : '지난 ' + late + '일 분량까지 오늘부터 시험 전날까지 다시 나눠요. 완료한 기록은 그대로 남아요.') +
-        '</p>' +
+        '<p class="muted" style="margin-top:12px">' + adjDesc + '</p>' +
         (late > 0 ? '<button class="btn" type="button" data-action="rebalance">오늘부터 다시 맞추기</button>' : '') +
         (store.reb ? '<button class="btn ghost" type="button" data-action="undoRebalance">원래대로 되돌리기</button>' : '') +
         '</section>';
@@ -419,8 +456,12 @@
         '<span class="pill ' + (done ? 'green' : 'blue') + '">' + (done ? '완료' : day.q + '문항') + '</span>' +
         '</div>' +
         '<div class="seg-list">' + segsHtml(day) + '</div>' +
-        '<button class="btn ' + (done ? 'ghost' : '') + '" type="button" data-action="toggle" data-date="' + day.date + '">' +
-        (done ? '✓ 완료했어요 · 되돌리기' : '공부 완료로 표시') + '</button>' +
+        partialNote(day) +
+        '<div class="btn-row">' +
+        '<button class="btn ghost wide" type="button" data-action="openAdjust" data-date="' + day.date + '">공부량 조정</button>' +
+        '<button class="btn ' + (done ? 'done' : '') + '" type="button" data-action="toggle" data-date="' + day.date + '">' +
+        (done ? '완료 취소' : '완료') + '</button>' +
+        '</div>' +
         '</section>';
     } else if (day && day.skip) {
       h += '<section class="card">' +
@@ -743,7 +784,7 @@
       '<div class="info-row"><span class="k">학습일</span><span class="v">' + studyDayLabel() + '</span></div>' +
       '<div class="info-row"><span class="k">범위</span><span class="v">' + META.books + '권 ' + nf(META.printedQuestions) + '문항 × ' + P.n + '회독</span></div>' +
       '<div class="info-row"><span class="k">삭제 문항</span><span class="v" style="font-size:12.5px">' + META.deleted.join(' · ') + '</span></div>' +
-      '<div class="info-row"><span class="k">앱 버전</span><span class="v">1.3.0</span></div>' +
+      '<div class="info-row"><span class="k">앱 버전</span><span class="v">1.4.0</span></div>' +
       '</div>';
 
     h += '<div class="section-title">홈 화면에 추가</div>' +
@@ -857,9 +898,104 @@
       '<p class="tiny" style="margin-top:12px">회독 수를 바꾸면 하루 분량이 다시 나뉘어요. 이미 체크한 날짜 기록은 그대로 남아요.</p>' +
       '<button class="btn ghost" type="button" data-action="closeSheet">닫기</button>';
   }
+  /* ---------- 시트: 공부량 조정 ---------- */
+  function adjustSheetHtml() {
+    var date = sheetState.date;
+    var d = P.byDate[date];
+    var items = sheetState.items || [];
+    var sel = sheetState.sel || {};
+    if (!d || d.skip || !items.length) {
+      return '<h3>공부량 조정</h3>' +
+        '<p class="muted" style="margin-top:10px">조정할 수 있는 날이 아니에요.</p>' +
+        '<button class="btn ghost" type="button" data-action="closeSheet" style="margin-top:16px">닫기</button>';
+    }
+    var groups = [], cur = null;
+    items.forEach(function (it) {
+      if (!cur || cur.b !== it.b) { cur = { b: it.b, s: it.n, e: it.n, items: [] }; groups.push(cur); }
+      cur.e = it.n;
+      cur.items.push(it);
+    });
+    var selCount = Object.keys(sel).length;
+    var h = '<p class="muted">' + d.round + '회독 · Day ' + d.id + ' · ' + md(date) + '</p>' +
+      '<h3>오늘 푼 문항</h3>' +
+      '<p class="tiny" style="margin-top:6px">푼 번호를 콕콕 눌러 주세요. 고른 만큼만 오늘 완료로 기록하고, 남은 문항은 다음 학습일부터 다시 나누어 담아요.</p>' +
+      '<div class="adj-sum"><span id="adjCount">' + selCount + ' / ' + items.length + '문항</span>' +
+      '<button type="button" class="linkbtn" data-action="adjAll">' +
+      (selCount === items.length ? '전체 해제' : '전체 선택') + '</button></div>' +
+      '<div class="adj-wrap">';
+    groups.forEach(function (g) {
+      h += '<div class="adj-book">' +
+        '<div class="adj-book-head">' + BOOKS[g.b].name +
+        '<span>' + pad3(g.s) + '~' + pad3(g.e) + ' · ' + g.items.length + '문항</span></div>' +
+        '<div class="chgrid">' + g.items.map(function (it) {
+          var k = it.b + ':' + it.n;
+          return '<button type="button" class="chcell' + (sel[k] ? ' on' : '') + '" data-action="adjToggle"' +
+            ' data-key="' + k + '" aria-pressed="' + (sel[k] ? 'true' : 'false') + '">' + it.n + '</button>';
+        }).join('') + '</div></div>';
+    });
+    h += '</div>' +
+      '<div class="btn-row">' +
+      '<button type="button" class="btn ghost" data-action="closeSheet">취소</button>' +
+      '<button type="button" class="btn" data-action="adjApply">완료</button>' +
+      '</div>';
+    return h;
+  }
+
+  function openAdjust(date) {
+    var d = P.byDate[date];
+    if (!d || d.skip) return;
+    var items = adjustUniverse(date);
+    var sel = {};
+    if (isDone(date)) itemsOfDay(d).forEach(function (it) { sel[it.b + ':' + it.n] = true; });
+    sheetState = { type: 'adjust', date: date, items: items, sel: sel };
+    renderSheet();
+    sheet.classList.add('on');
+    backdrop.classList.add('on');
+    sheet.setAttribute('aria-hidden', 'false');
+  }
+
+  function updateAdjustUI() {
+    if (!sheetState || sheetState.type !== 'adjust') return;
+    var sel = sheetState.sel;
+    var cells = sheetBody.querySelectorAll('.chcell');
+    for (var i = 0; i < cells.length; i++) {
+      var on = !!sel[cells[i].dataset.key];
+      cells[i].classList.toggle('on', on);
+      cells[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+    var n = Object.keys(sel).length;
+    var c = sheetBody.querySelector('#adjCount');
+    if (c) c.textContent = n + ' / ' + sheetState.items.length + '문항';
+    var allBtn = sheetBody.querySelector('[data-action="adjAll"]');
+    if (allBtn) allBtn.textContent = (n === sheetState.items.length) ? '전체 해제' : '전체 선택';
+  }
+
+  function applyAdjust() {
+    var date = sheetState.date;
+    var sel = sheetState.sel || {};
+    var prev = store.reb;
+    var prevPartial = !!(prev && prev.reason === 'partial' && prev.partialDate === date);
+    var universe = adjustUniverse(date);
+    var chosen = universe.filter(function (it) { return sel[it.b + ':' + it.n]; });
+    if (!chosen.length) { toast('푼 문항을 하나 이상 골라 주세요'); return; }
+    var rest = universe.length - chosen.length;
+    if (!rest && !prevPartial) {
+      store.checks[date] = Date.now();
+      persist();
+      closeSheet();
+      render();
+      toast('완료! ' + universe.length + '문항 진행률에 반영했어요');
+      return;
+    }
+    doPartial(date, chosen, universe);
+  }
+
   function renderSheet() {
     if (!sheetState) return;
-    sheetBody.innerHTML = sheetState.type === 'day' ? daySheetHtml(sheetState.date) : targetSheetHtml();
+    var type = sheetState.type;
+    sheetBody.innerHTML = type === 'day' ? daySheetHtml(sheetState.date)
+      : type === 'adjust' ? adjustSheetHtml()
+        : targetSheetHtml();
   }
   function openSheet(st) {
     sheetState = st;
@@ -1030,6 +1166,16 @@
     }
     return ends;
   }
+  // 여러 날짜 중 가장 이른 값
+  function minDate() {
+    var v = null;
+    for (var i = 0; i < arguments.length; i++) {
+      var x = arguments[i];
+      if (!x) continue;
+      if (!v || x < v) v = x;
+    }
+    return v;
+  }
   // 오늘(또는 오늘 이후 처음 미완료한 날)부터가 다시 맞출 구간
   function rebalanceFrom() {
     for (var i = 0; i < P.days.length; i++) {
@@ -1040,33 +1186,24 @@
     }
     return null;
   }
-  function doRebalance() {
-    var from = rebalanceFrom();
-    if (!from) { toast('다시 맞출 남은 일정이 없어요'); return; }
-    var dates = [];
-    P.days.forEach(function (d) { if (d.date >= from) dates.push(d.date); });
-    if (!dates.length) { toast('남은 학습일이 없어요'); return; }
+  function sameDay(a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; }
+  // 하루치 기록을 저장용 조각으로 복사한다
+  function dayEntry(d) {
+    return {
+      date: d.date, round: d.round, rday: 0, q: d.q,
+      segs: d.segs.map(function (s) {
+        return { b: s.b, s: s.s, e: s.e, n: s.n, del: (s.del || []).slice() };
+      })
+    };
+  }
 
-    var lists = [], missed = 0;
-    for (var r = 1; r <= P.n; r++) {
-      var arr = [];
-      for (var i = 0; i < P.days.length; i++) {
-        var d = P.days[i];
-        if (d.round !== r || d.skip || isDone(d.date)) continue;
-        if (d.date < from) missed += d.q;
-        var it = itemsOfDay(d);
-        for (var k = 0; k < it.length; k++) arr.push(it[k]);
-      }
-      lists.push(arr);
-    }
-    var total = lists.reduce(function (a, l) { return a + l.length; }, 0);
-    if (!total) { toast('밀린 분량이 없어요'); return; }
-
+  // 남은 문항을 남은 날짜에 회독 순서대로 고르게 배분한다
+  function distribute(lists, dates) {
     var active = [];
     lists.forEach(function (l, i) { if (l.length) active.push({ r: i + 1, list: l }); });
-
     var D = dates.length;
     var outDays = [];
+    if (!active.length || !D) return outDays;
 
     if (D >= active.length) {
       var alloc = allocDays(active.map(function (x) { return x.list.length; }), D);
@@ -1094,17 +1231,64 @@
       var posAll = 0;
       for (var q = 0; q < useD; q++) {
         var chunk = all.slice(posAll, endsAll[q]); posAll = endsAll[q];
+        if (!chunk.length) continue;
         var sg = segsFromItems(chunk.map(function (x) { return { b: x.b, n: x.n }; }));
         outDays.push({
-          date: dates[q], round: chunk[0].r, rday: q + 1,
+          date: dates[outDays.length], round: chunk[0].r, rday: outDays.length + 1,
           q: sg.reduce(function (a, s) { return a + s.n; }, 0), segs: sg
         });
       }
     }
+    return outDays;
+  }
 
-    store.reb = sanitizeReb({
-      from: from, createdAt: new Date().toISOString(), items: total, days: outDays
-    }, P.n);
+  function doRebalance() {
+    var from0 = rebalanceFrom();
+    if (!from0) { toast('다시 맞출 남은 일정이 없어요'); return; }
+    // 이미 다시 맞춘 계획이 있으면 그 시작점은 그대로 두고 이어서 맞춘다
+    var keepFrom = minDate(store.reb ? store.reb.from : null, from0) || from0;
+
+    var keep = [], lists = [], dates = [], missed = 0, total = 0;
+    for (var r = 0; r < P.n; r++) lists[r] = [];
+    var moved = {};
+
+    P.days.forEach(function (d) {
+      if (d.skip) return;
+      if (d.date < from0) {
+        if (isDone(d.date)) { if (d.date >= keepFrom) keep.push(dayEntry(d)); return; }
+        // 안 하고 지난 날의 분량도 앞으로 넘겨 담는다
+        var pm = itemsOfDay(d);
+        missed += pm.length;
+        pm.forEach(function (it) { (moved[d.round - 1] = moved[d.round - 1] || []).push(it); });
+        return;
+      }
+      if (isDone(d.date)) { keep.push(dayEntry(d)); return; }
+      dates.push(d.date);
+      itemsOfDay(d).forEach(function (it) { lists[d.round - 1].push(it); });
+    });
+    Object.keys(moved).forEach(function (k) { lists[k] = moved[k].concat(lists[k]); });
+    lists.forEach(function (l) { total += l.length; });
+    if (!total) { toast('밀린 분량이 없어요'); return; }
+    if (!dates.length) { toast('남은 학습일이 없어요'); return; }
+
+    var outDays = distribute(lists, dates);
+    if (!outDays.length) { toast('남은 학습일이 없어요'); return; }
+
+    var meta = {};
+    var prev = store.reb;
+    if (prev && prev.reason === 'partial' && prev.partialDate >= keepFrom && isDone(prev.partialDate)) {
+      meta = {
+        reason: 'partial', partialDate: prev.partialDate, partialQ: prev.partialQ,
+        partialTotal: prev.partialTotal, prevDone: prev.prevDone, orig: prev.orig
+      };
+    }
+    var payload = {
+      from: keepFrom, createdAt: new Date().toISOString(), items: total,
+      days: keep.concat(outDays).sort(sameDay)
+    };
+    Object.keys(meta).forEach(function (key) { payload[key] = meta[key]; });
+
+    store.reb = sanitizeReb(payload, P.n);
     if (!store.reb) { toast('일정을 다시 맞추지 못했어요'); return; }
 
     persist();
@@ -1119,8 +1303,87 @@
       '을 ' + outDays.length + '일에 다시 나눴어요 · 하루 약 ' + Math.round(total / outDays.length) + '문항');
   }
 
+  /* ---------- 오늘 공부량 미세 조정 ---------- */
+  // 오늘 날짜의 전체 문항(조정 전 기준). 이미 조정한 날이면 그때의 원래 문항을 돌려준다.
+  function adjustUniverse(date) {
+    var d = P.byDate[date];
+    if (!d || d.skip) return [];
+    var r = store.reb;
+    if (r && r.reason === 'partial' && r.partialDate === date && r.orig && r.orig.length) {
+      return r.orig.map(function (it) { return { b: it.b, n: it.n }; });
+    }
+    return itemsOfDay(d);
+  }
+
+  // 고른 문항만 오늘 완료로 남기고, 나머지는 다음 학습일부터 다시 나누어 담는다
+  function doPartial(date, chosen, universe) {
+    var day = P.byDate[date];
+    if (!day || day.skip) { toast('조정할 수 없는 날이에요'); return; }
+
+    var keepFrom = minDate(store.reb ? store.reb.from : null, date) || date;
+    var uniKey = {};
+    universe.forEach(function (it) { uniKey[it.b + ':' + it.n] = 1; });
+    var chKey = {};
+    chosen.forEach(function (it) { chKey[it.b + ':' + it.n] = 1; });
+    var rest = universe.filter(function (it) { return !chKey[it.b + ':' + it.n]; });
+
+    var keep = [], lists = [], dates = [];
+    for (var r = 0; r < P.n; r++) lists[r] = [];
+    var moved = {};
+
+    P.days.forEach(function (d) {
+      if (d.skip) return;
+      if (d.date < date) {
+        if (isDone(d.date)) { if (d.date >= keepFrom) keep.push(dayEntry(d)); return; }
+        itemsOfDay(d).forEach(function (it) { (moved[d.round - 1] = moved[d.round - 1] || []).push(it); });
+        return;
+      }
+      if (d.date === date) return;
+      if (isDone(d.date)) { keep.push(dayEntry(d)); return; }
+      dates.push(d.date);
+      itemsOfDay(d).forEach(function (it) {
+        if (d.round === day.round && uniKey[it.b + ':' + it.n]) return;   // 오늘로 되돌아온 문항은 아래에서 다시 넣는다
+        lists[d.round - 1].push(it);
+      });
+    });
+
+    Object.keys(moved).forEach(function (k) { lists[k] = moved[k].concat(lists[k]); });
+    if (rest.length) {
+      if (!dates.length) { toast('남은 학습일이 없어 조정할 수 없어요'); return; }
+      lists[day.round - 1] = rest.concat(lists[day.round - 1]);
+    }
+
+    var outDays = distribute(lists, dates);
+    var todayEntry = dayEntry({ date: date, round: day.round, q: chosen.length, segs: segsFromItems(chosen) });
+    var allDays = keep.concat([todayEntry]).concat(outDays).sort(sameDay);
+    var restTotal = outDays.reduce(function (a, d) { return a + d.q; }, 0);
+
+    var prevDone = (store.reb && store.reb.partialDate === date) ? !!store.reb.prevDone : isDone(date);
+    store.reb = sanitizeReb({
+      from: keepFrom, createdAt: new Date().toISOString(), items: restTotal,
+      reason: 'partial', partialDate: date, partialQ: chosen.length, partialTotal: universe.length,
+      prevDone: prevDone, orig: universe, days: allDays
+    }, P.n);
+    if (!store.reb) { toast('공부량을 조정하지 못했어요'); return; }
+
+    store.checks[date] = Date.now();
+    persist();
+    replan();
+    state.round = roundOfDate(TODAY);
+    if (state.round > P.n) state.round = P.n;
+    state.book = -1;
+    if (!P.byDate[state.sel]) state.sel = TODAY;
+    closeSheet();
+    render();
+    toast(rest.length
+      ? '오늘 ' + chosen.length + '문항 완료 · 남은 ' + rest.length + '문항을 ' + outDays.length + '일에 다시 나눴어요'
+      : '오늘 ' + chosen.length + '문항 완료 · 계획을 다시 정리했어요');
+  }
+
   function undoRebalance() {
     if (!store.reb) { toast('되돌릴 다시 맞추기가 없어요'); return; }
+    var wasPartial = store.reb.reason === 'partial';
+    if (wasPartial && isIso(store.reb.partialDate) && !store.reb.prevDone) delete store.checks[store.reb.partialDate];
     store.reb = null;
     persist();
     replan();
@@ -1130,7 +1393,7 @@
     if (!P.byDate[state.sel]) state.sel = TODAY;
     render();
     if (sheetState) renderSheet();
-    toast('원래 일정으로 되돌렸어요');
+    toast(wasPartial ? '공부량 조정 전으로 되돌렸어요' : '원래 일정으로 되돌렸어요');
   }
 
   function setIncludeSun(on) {
@@ -1200,6 +1463,26 @@
     }
     if (a === 'openTarget') { openSheet({ type: 'target' }); return; }
     if (a === 'setTarget') { applyTarget(Number(el.dataset.n)); return; }
+    if (a === 'openAdjust') { openAdjust(el.dataset.date); return; }
+    if (a === 'adjToggle') {
+      var ak = el.dataset.key;
+      if (sheetState && sheetState.type === 'adjust') {
+        if (sheetState.sel[ak]) delete sheetState.sel[ak];
+        else sheetState.sel[ak] = true;
+        updateAdjustUI();
+      }
+      return;
+    }
+    if (a === 'adjAll') {
+      if (sheetState && sheetState.type === 'adjust') {
+        var allOn = Object.keys(sheetState.sel).length === sheetState.items.length;
+        sheetState.sel = {};
+        if (!allOn) sheetState.items.forEach(function (it) { sheetState.sel[it.b + ':' + it.n] = true; });
+        updateAdjustUI();
+      }
+      return;
+    }
+    if (a === 'adjApply') { applyAdjust(); return; }
     if (a === 'openDay') { openSheet({ type: 'day', date: el.dataset.date }); return; }
     if (a === 'toggleSun') { setIncludeSun(!store.includeSun); return; }
     if (a === 'rebalance') { doRebalance(); return; }
