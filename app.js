@@ -58,6 +58,27 @@
   var BOOK_START = [];
   BOOKS.reduce(function (acc, b, i) { BOOK_START[i] = acc; return acc + b.printed; }, 0);
 
+  /* ---------- 개론 예상문제 (66권 467문항) ---------- */
+  var GAER = DATA.gaeron || null;
+  var GSTART = (GAER && GAER.start) || '2026-11-25';   // 개론 배분 시작일
+  var GBOOKS = (GAER && GAER.books) || [];
+  var GFLAT = [];
+  GBOOKS.forEach(function (b, bi) {
+    for (var n = 1; n <= b.count; n++) GFLAT.push({ b: bi, n: n });
+  });
+  var GTOTAL = GFLAT.length;                            // 467
+
+  function gkey(it) { return it.b + ':' + it.n; }
+  function gkeyItems(keys) {
+    var out = [];
+    keys.forEach(function (k) {
+      var p = String(k).split(':');
+      out.push({ b: Number(p[0]), n: Number(p[1]) });
+    });
+    return out;
+  }
+
+
   /* ---------- 회독 수별 기본 계획 ---------- */
   var PLAN_CACHE = {};
   function planBase(N, incSun) {
@@ -146,17 +167,64 @@
     v = Math.round(Number(v) || DEFR);
     return Math.max(1, Math.min(MAXR, v));
   }
+  // 개론 기록: { 'YYYY-MM-DD': { n: 그날 배정 문항 수, o: [전체 키], k: [완료 키] } }
+  // v1·v2·v3 앱의 기록(배열 형태)도 그대로 읽을 수 있게 둔다.
+  function sanitizeG(raw) {
+    var out = {};
+    if (!raw || typeof raw !== 'object') return out;
+    Object.keys(raw).forEach(function (date) {
+      if (!isIso(date)) return;
+      var v = raw[date], arr = null, total = 0;
+      if (Array.isArray(v)) { arr = v; total = v.length; }
+      else if (v && typeof v === 'object' && Array.isArray(v.k)) {
+        arr = v.k;
+        total = Math.max(arr.length, Number(v.n) || 0);
+      }
+      if (!arr) return;
+      var keys = [], seen = {};
+      arr.forEach(function (s) {
+        if (typeof s !== 'string') return;
+        var p = s.split(':');
+        if (p.length !== 2) return;
+        var b = Number(p[0]), q = Number(p[1]);
+        if (!(b >= 0 && b < GBOOKS.length)) return;
+        if (!(q >= 1 && q <= GBOOKS[b].count)) return;
+        var key = b + ':' + q;
+        if (seen[key]) return;
+        seen[key] = 1;
+        keys.push(key);
+      });
+      if (!keys.length) return;
+      var oKeys = keys.slice();
+      if (v && typeof v === 'object' && Array.isArray(v.o)) {
+        var o = [];
+        v.o.forEach(function (s) {
+          if (typeof s !== 'string') return;
+          var p = s.split(':');
+          if (p.length !== 2) return;
+          var b = Number(p[0]), q = Number(p[1]);
+          if (!(b >= 0 && b < GBOOKS.length)) return;
+          if (!(q >= 1 && q <= GBOOKS[b].count)) return;
+          if (o.indexOf(b + ':' + q) < 0) o.push(b + ':' + q);
+        });
+        if (o.length) oKeys = o;
+      }
+      out[date] = { n: Math.max(total, oKeys.length), o: oKeys, k: keys };
+    });
+    return out;
+  }
   function loadStore() {
     try {
       var raw = localStorage.getItem(KEY);
       if (raw) {
         var o = JSON.parse(raw);
         return {
-          v: 3,
+          v: 4,
           target: clampTarget(o && o.target),
           includeSun: (o && typeof o.includeSun === 'boolean') ? o.includeSun : true,
           checks: (o && o.checks && typeof o.checks === 'object') ? o.checks : {},
-          reb: sanitizeReb(o && o.reb, clampTarget(o && o.target))
+          reb: sanitizeReb(o && o.reb, clampTarget(o && o.target)),
+          g: sanitizeG(o && o.g)
         };
       }
       var old = localStorage.getItem(OLD_KEY);
@@ -167,15 +235,15 @@
           var dd = p3.byId[Number(k)];
           if (dd) ch[dd.date] = oo.checks[k];
         });
-        return { v: 3, target: 3, includeSun: true, checks: ch, reb: null };
+        return { v: 4, target: 3, includeSun: true, checks: ch, reb: null, g: {} };
       }
     } catch (e) { storageOK = false; }
-    return { v: 3, target: DEFR, includeSun: true, checks: {}, reb: null };
+    return { v: 4, target: DEFR, includeSun: true, checks: {}, reb: null, g: {} };
   }
   function persist() {
     try {
       localStorage.setItem(KEY, JSON.stringify({
-        v: 3, target: target, includeSun: store.includeSun, checks: store.checks, reb: store.reb
+        v: 4, target: target, includeSun: store.includeSun, checks: store.checks, reb: store.reb, g: store.g
       }));
     } catch (e) { storageOK = false; }
   }
@@ -300,6 +368,113 @@
 
   function isDone(date) { return !!store.checks[date]; }
 
+  /* ---------- 개론 예상문제 계획 ---------- */
+  // 개론은 성경문제와 별도의 문제 번호를 쓴다. 회독마다 467문항을 그 회독의 남은 학습일에
+  // 고르게 나누고, 아직 안 푼 문항은 오늘 이후 학습일로 계속 넘겨 담는다(조정·밀림 자동 반영).
+  var G = { byDate: {}, roundTot: {}, roundDone: {}, days: 0, doneDays: 0, total: 0, done: 0, unscheduled: 0 };
+
+  function gsortItems(items) {
+    return items.slice().sort(function (a, b) { return (a.b - b.b) || (a.n - b.n); });
+  }
+  function gsegs(items) {
+    var segs = [];
+    gsortItems(items).forEach(function (x) {
+      var last = segs[segs.length - 1];
+      if (last && last.b === x.b && x.n === last.e + 1) { last.e = x.n; last.n++; }
+      else segs.push({ b: x.b, s: x.n, e: x.n, n: 1 });
+    });
+    return segs;
+  }
+  function gsegLines(segs) {
+    return segs.map(function (s) {
+      return '<div class="seg-line"><span>' + GBOOKS[s.b].name + ' ' + pad3(s.s) + '~' + pad3(s.e) +
+        '</span><span class="n">' + s.n + '문항</span></div>';
+    }).join('');
+  }
+  function gRangeText(segs) {
+    return segs.map(function (s) {
+      return GBOOKS[s.b].name + ' ' + pad3(s.s) + (s.e > s.s ? '~' + pad3(s.e) : '');
+    }).join(' · ');
+  }
+  function buildG() {
+    var res = { byDate: {}, roundTot: {}, roundDone: {}, days: 0, doneDays: 0, total: 0, done: 0, unscheduled: 0 };
+    G = res;
+    if (!GAER || !GTOTAL) return;
+    var gmap = store.g || {};
+    for (var r = 1; r <= P.n; r++) {
+      var dsel = P.days.filter(function (d) { return d.round === r && !d.skip && d.q > 0; });
+      if (!dsel.length) continue;
+      var doneSet = {}, rDone = 0, hasDates = false, allDates = [];
+      dsel.forEach(function (d) {
+        if (d.date >= GSTART) { hasDates = true; allDates.push(d.date); }
+        var rec = gmap[d.date];
+        if (rec) (rec.k || []).forEach(function (k) { if (!doneSet[k]) { doneSet[k] = 1; rDone++; } });
+      });
+      if (!hasDates && !rDone) continue;   // 개론이 시작되기 전에 끝난 회독
+      rDone = Math.min(rDone, GTOTAL);
+      res.roundTot[r] = GTOTAL;
+      res.roundDone[r] = rDone;
+      res.total += GTOTAL;
+      res.done += rDone;
+      res.days += allDates.length;
+      allDates.forEach(function (dt) {
+        var rec = gmap[dt];
+        if (rec && rec.k.length >= rec.o.length) res.doneDays++;
+      });
+      var dates = allDates.filter(function (dt) { return dt >= TODAY && !gmap[dt]; });
+      var rem = GFLAT.filter(function (it) { return !doneSet[gkey(it)]; });
+      if (!rem.length) continue;
+      if (!dates.length) { res.unscheduled += rem.length; continue; }
+      var cnt = Math.min(dates.length, rem.length);
+      var ends = splitEnds(rem, cnt);
+      var pos = 0;
+      for (var i = 0; i < cnt; i++) {
+        var chunk = rem.slice(pos, ends[i]);
+        pos = ends[i];
+        if (!chunk.length) continue;
+        res.byDate[dates[i]] = { round: r, items: chunk, segs: gsegs(chunk), q: chunk.length, total: chunk.length };
+      }
+    }
+    // 이미 기록한 날은 그날 실제 푼 문항을 그대로 보여 준다(부분 완료 포함)
+    Object.keys(gmap).forEach(function (dt) {
+      var rec = gmap[dt];
+      if (!rec) return;
+      var items = gkeyItems(rec.k || []);
+      var base = res.byDate[dt];
+      res.byDate[dt] = {
+        round: base ? base.round : roundOfDate(dt),
+        items: gsortItems(items), segs: gsegs(items), q: items.length,
+        total: Math.max(rec.o.length, rec.n || 0), rec: true,
+        done: items.length >= Math.max(rec.o.length, rec.n || 0)
+      };
+    });
+  }
+  // 그날 조정 화면에서 보여 줄 개론 전체 문항 (이미 기록이 있으면 그때의 전체 문항)
+  function gUniverse(date) {
+    var rec = store.g[date];
+    if (rec && rec.o && rec.o.length) return gsortItems(gkeyItems(rec.o));
+    var gi = G.byDate[date];
+    if (gi && !gi.rec) return gi.items.slice();
+    return [];
+  }
+  function gPartialNote(date) {
+    var rec = store.g[date];
+    if (!rec || rec.k.length >= rec.o.length) return '';
+    return '<p class="tiny" style="margin-top:8px;color:var(--tx2)">📚 개론 ' + rec.o.length + '문항 중 ' + rec.k.length +
+      '문항 완료 · 남은 ' + (rec.o.length - rec.k.length) + '문항은 다음 학습일부터 다시 나눠 담았어요</p>';
+  }
+  // 개론 한 줄 표시(회독 목록·캘린더·시트 공통)
+  function gInfo(date) {
+    var gi = G.byDate[date];
+    if (!gi) return null;
+    return {
+      q: gi.q, total: gi.total || gi.q, rec: !!gi.rec, done: !!gi.done,
+      segs: gi.segs, text: gi.rec && gi.q < (gi.total || gi.q)
+        ? gRangeText(gi.segs) + ' · ' + gi.q + ' / ' + (gi.total || gi.q) + '문항'
+        : gRangeText(gi.segs) + ' · ' + gi.q + '문항'
+    };
+  }
+
   /* ---------- 계산 ---------- */
   function statFor(days) {
     var done = 0, total = 0, doneDays = 0, studyDays = 0;
@@ -386,6 +561,25 @@
       '<div class="foot"><span>' + extra[0] + '</span><span>' + extra[1] + '</span></div>' +
       '</div>';
   }
+  // 교재별 한 줄(성경문제 · 개론 예상문제)
+  function trackRow(ico, name, sub, done, total, green) {
+    var pct = total ? done / total * 100 : 0;
+    return '<div class="trk"><span class="ti">' + ico + '</span><div class="grow">' +
+      '<div class="trow"><span class="tname">' + name + '</span>' +
+      '<span class="tval' + (pct > 0 ? '' : ' zero') + '">' + fmtPct(pct) + '</span></div>' +
+      '<div class="bar thin' + (green ? ' g' : '') + '"><i style="width:' + (pct > 0 ? Math.max(1.5, pct) : 0) + '%"></i></div>' +
+      '<div class="foot"><span>' + sub + '</span><span>' + nf(done) + ' / ' + nf(total) + '문항</span></div>' +
+      '</div></div>';
+  }
+  // 하루 카드의 교재 제목줄(+ 개별 완료 체크)
+  function trackHead(ico, name, count, track, date, on) {
+    return '<div class="track-row"><span class="tico">' + ico + '</span>' +
+      '<span class="tname">' + name + '</span>' +
+      '<span class="tn2">' + count + '</span>' +
+      (track ? '<button type="button" class="tchk' + (on ? ' on' : '') + '" data-action="toggleTrack" data-track="' + track +
+        '" data-date="' + date + '" aria-label="' + name + ' 완료" aria-pressed="' + (on ? 'true' : 'false') + '">' + CHK + '</button>' : '') +
+      '</div>';
+  }
 
   /* ---------- 화면: 오늘 ---------- */
   function viewToday() {
@@ -421,6 +615,13 @@
       '<div class="divider"></div>' +
       metric('이번 주', '', wk, ['완료 ' + wk.doneDays + '일 / ' + wk.days + '일',
         wk.days ? nf(wk.done) + ' / ' + nf(wk.total) + '문항' : '학습일이 없어요']) +
+      (GAER && GTOTAL
+        ? '<div class="divider"></div>' +
+          '<div class="trk-title">교재별 진행률</div>' +
+          trackRow('📖', '성경문제', nf(META.activeQuestions) + '문항 × ' + P.n + '회독', all.done, all.total, false) +
+          trackRow('📚', '개론 예상문제', nf(GTOTAL) + '문항 × ' + Math.max(1, Math.round(G.total / GTOTAL)) + '회독',
+            G.done, G.total, true)
+        : '') +
       '</section>';
 
     if (late > 0 || store.reb) {
@@ -450,14 +651,24 @@
 
     if (day && !day.skip) {
       var done = isDone(day.date);
-      h += '<section class="card' + (done ? ' soft' : '') + '">' +
+      var gi = gInfo(day.date);
+      var gdone = !!(gi && gi.done);
+      h += '<section class="card' + (done && (!gi || gdone) ? ' soft' : '') + '">' +
         '<div class="row">' +
         '<div class="study-top"><div class="study-badge">' + day.round + '회독</div>' +
         '<div><p class="muted">오늘의 공부</p><div class="h2" style="margin-top:2px">Day ' + day.id + '</div></div></div>' +
         '<span class="pill ' + (done ? 'green' : 'blue') + '">' + (done ? '완료' : day.q + '문항') + '</span>' +
         '</div>' +
-        '<div class="seg-list">' + segsHtml(day) + '</div>' +
+        '<div class="seg-list">' +
+        trackHead('📖', '성경문제', day.q + '문항', 'bible', day.date, done) + segsHtml(day) +
+        (gi
+          ? trackHead('📚', '개론 예상문제',
+            (gi.rec && gi.q < gi.total) ? gi.q + ' / ' + gi.total + '문항' : gi.q + '문항', 'gaeron', day.date, gdone) +
+            gsegLines(gi.segs)
+          : trackHead('📚', '개론 예상문제', '오늘은 없음', null, day.date, false)) +
+        '</div>' +
         partialNote(day) +
+        gPartialNote(day.date) +
         '<div class="btn-row">' +
         '<button class="btn ghost wide" type="button" data-action="openAdjust" data-date="' + day.date + '">공부량 조정</button>' +
         '<button class="btn ' + (done ? 'done' : '') + '" type="button" data-action="toggle" data-date="' + day.date + '">' +
@@ -530,6 +741,15 @@
       '<div class="h2" style="margin-top:2px">' + P.n + '회독</div></div>' +
       '<button type="button" class="btn ghost sm" data-action="openTarget">회독 수 변경</button></div>' +
       '<p class="tiny" style="margin-top:10px">' + studyDayLabel() + ' · 회독당 ' + r.days + '일 · 하루 ' + perDayOf(r.days) + '</p>' +
+      (function () {
+        if (!GAER || !GTOTAL) return '';
+        var gd = P.days.filter(function (d) {
+          return d.round === state.round && !d.skip && d.q > 0 && d.date >= GSTART;
+        }).length;
+        if (!gd) return '';
+        return '<p class="tiny" style="margin-top:4px">📚 개론 예상문제 · 이 회독 ' + gd + '일 · 하루 약 ' +
+          Math.round(GTOTAL / gd) + '문항 (회독당 ' + nf(GTOTAL) + '문항)</p>';
+      })() +
       '</section>';
 
     h += '<div class="chips">' + P.rounds.map(function (x) {
@@ -586,7 +806,11 @@
           d.segs.map(function (s) {
             return '<span class="t2">' + BOOKS[s.b].name + ' ' + pad3(s.s) + '~' + pad3(s.e) +
               (s.del && s.del.length ? ' · 삭제' : '') + '</span>';
-          }).join('') + '</span>' +
+          }).join('') +
+          (function () {
+            var g = gInfo(d.date);
+            return g ? '<span class="t2 g">📚 개론 ' + g.text + '</span>' : '';
+          })() + '</span>' +
           '<span class="qcount">' + d.q + '문항</span>' +
           '</button>';
       });
@@ -690,6 +914,12 @@
         '<div class="h2" style="margin-top:2px">' + longKo(sel) + '</div></div>' +
         '<span class="pill ' + (done ? 'green' : 'blue') + '">' + (done ? '완료' : sday.q + '문항') + '</span></div>' +
         '<div class="seg-list">' + segsHtml(sday) + '</div>' +
+        (function () {
+          var g = gInfo(sel);
+          return g ? '<div class="seg-list g-list">' + trackHead('📚', '개론 예상문제',
+            (g.rec && g.q < g.total) ? g.q + ' / ' + g.total + '문항' : g.q + '문항', null, sel, g.done) +
+            gsegLines(g.segs) + '</div>' : '';
+        })() +
         '<button class="btn ' + (done ? 'ghost' : '') + '" type="button" data-action="toggle" data-date="' + sday.date + '">' +
         (done ? '✓ 완료했어요 · 되돌리기' : '공부 완료로 표시') + '</button>';
     } else if (sday && sday.skip) {
@@ -730,7 +960,11 @@
 
     h += '<div class="section-title">공부 기록</div><div class="list">' +
       '<div class="info-row"><span class="k">완료한 날</span><span class="v">' + all.doneDays + '일 / ' + all.days + '일</span></div>' +
-      '<div class="info-row"><span class="k">완료한 문항</span><span class="v">' + nf(all.done) + ' / ' + nf(all.total) + '문항</span></div>' +
+      '<div class="info-row"><span class="k">성경문제 완료</span><span class="v">' + nf(all.done) + ' / ' + nf(all.total) + '문항</span></div>' +
+      (GAER && GTOTAL
+        ? '<div class="info-row"><span class="k">개론 예상문제 완료</span><span class="v">' + nf(G.done) + ' / ' + nf(G.total) + '문항</span></div>' +
+          '<div class="info-row"><span class="k">개론 학습일</span><span class="v">' + G.doneDays + '일 / ' + G.days + '일</span></div>'
+        : '') +
       '<div class="info-row"><span class="k">마지막 체크</span><span class="v">' + (last ? longKo(ymd(new Date(last))) : '아직 없음') + '</span></div>' +
       '</div>';
 
@@ -744,6 +978,9 @@
       '<span class="sw' + (store.includeSun ? ' on' : '') + '"><i></i></span></button>' +
       '<div class="info-row"><span class="k">회독당</span><span class="v">' + P.rounds[0].days + '일 · 하루 ' + perDayOf(P.rounds[0].days) + '</span></div>' +
       '<div class="info-row"><span class="k">1회독 범위</span><span class="v">' + META.books + '권 ' + nf(META.printedQuestions) + '문항</span></div>' +
+      (GAER && GTOTAL
+        ? '<div class="info-row"><span class="k">개론 예상문제</span><span class="v">' + GBOOKS.length + '권 ' + nf(GTOTAL) + '문항 · 회독마다</span></div>'
+        : '') +
       '</div>';
 
     h += '<div class="section-title">일정 조정</div><div class="list">' +
@@ -783,9 +1020,10 @@
     h += '<div class="section-title">학습 정보</div><div class="list">' +
       '<div class="info-row"><span class="k">공부 기간</span><span class="v">' + META.start.replace(/-/g, '.') + ' ~ ' + META.end.replace(/-/g, '.') + '</span></div>' +
       '<div class="info-row"><span class="k">학습일</span><span class="v">' + studyDayLabel() + '</span></div>' +
-      '<div class="info-row"><span class="k">범위</span><span class="v">' + META.books + '권 ' + nf(META.printedQuestions) + '문항 × ' + P.n + '회독</span></div>' +
+      '<div class="info-row"><span class="k">범위</span><span class="v">' + META.books + '권 ' + nf(META.printedQuestions) + '문항 × ' + P.n + '회독' +
+      (GAER && GTOTAL ? ' + 개론 ' + nf(GTOTAL) + '문항 × ' + Math.max(1, Math.round(G.total / GTOTAL)) + '회독' : '') + '</span></div>' +
       '<div class="info-row"><span class="k">삭제 문항</span><span class="v" style="font-size:12.5px">' + META.deleted.join(' · ') + '</span></div>' +
-      '<div class="info-row"><span class="k">앱 버전</span><span class="v">1.4.0</span></div>' +
+      '<div class="info-row"><span class="k">앱 버전</span><span class="v">1.5.0</span></div>' +
       '</div>';
 
     h += '<div class="section-title">홈 화면에 추가</div>' +
@@ -847,6 +1085,7 @@
     document.getElementById('appSub').textContent = subFor();
   }
   function render() {
+    buildG();
     view.innerHTML = VIEWS[state.tab]();
     updateChrome();
   }
@@ -876,10 +1115,15 @@
         '<button class="btn ghost" type="button" data-action="closeSheet" style="margin-top:16px">닫기</button>';
     }
     var done = isDone(date);
+    var gi = gInfo(date);
     return '<p class="muted">' + d.round + '회독 · Day ' + d.id + ' / ' + P.n + '회독 계획</p>' +
       '<h3>' + longKo(date) + '</h3>' +
       '<p class="tiny" style="margin-top:2px">' + (done ? '완료한 날이에요' : '아직 체크하지 않았어요') + '</p>' +
-      '<div class="seg-list" style="margin-top:16px">' + segsHtml(d) + '</div>' +
+      '<div class="seg-list" style="margin-top:16px">' + trackHead('📖', '성경문제', d.q + '문항', null, date, done) +
+      segsHtml(d) + '</div>' +
+      (gi ? '<div class="seg-list g-list">' + trackHead('📚', '개론 예상문제',
+        (gi.rec && gi.q < gi.total) ? gi.q + ' / ' + gi.total + '문항' : gi.q + '문항', null, date, gi.done) +
+        gsegLines(gi.segs) + '</div>' + gPartialNote(date) : '') +
       '<button class="btn ' + (done ? 'ghost' : '') + '" type="button" data-action="toggle" data-date="' + date + '">' +
       (done ? '✓ 완료했어요 · 되돌리기' : '공부 완료로 표시') + '</button>' +
       '<button class="btn ghost" type="button" data-action="closeSheet" style="margin-top:8px">닫기</button>';
@@ -905,37 +1149,66 @@
     var d = P.byDate[date];
     var items = sheetState.items || [];
     var sel = sheetState.sel || {};
-    if (!d || d.skip || !items.length) {
+    var gitems = sheetState.gitems || [];
+    var gsel = sheetState.gsel || {};
+    if (!d || d.skip || (!items.length && !gitems.length)) {
       return '<h3>공부량 조정</h3>' +
         '<p class="muted" style="margin-top:10px">조정할 수 있는 날이 아니에요.</p>' +
         '<button class="btn ghost" type="button" data-action="closeSheet" style="margin-top:16px">닫기</button>';
     }
-    var groups = [], cur = null;
-    items.forEach(function (it) {
-      if (!cur || cur.b !== it.b) { cur = { b: it.b, s: it.n, e: it.n, items: [] }; groups.push(cur); }
-      cur.e = it.n;
-      cur.items.push(it);
-    });
+    function groupOf(list) {
+      var groups = [], cur = null;
+      list.forEach(function (it) {
+        if (!cur || cur.b !== it.b) { cur = { b: it.b, s: it.n, e: it.n, items: [] }; groups.push(cur); }
+        cur.e = it.n;
+        cur.items.push(it);
+      });
+      return groups;
+    }
+    var groups = groupOf(items);
+    var ggroups = groupOf(gitems);
     var selCount = Object.keys(sel).length;
+    var gSelCount = Object.keys(gsel).length;
     var h = '<p class="muted">' + d.round + '회독 · Day ' + d.id + ' · ' + md(date) + '</p>' +
       '<h3>오늘 푼 문항</h3>' +
-      '<p class="tiny" style="margin-top:6px">푼 번호를 콕콕 눌러 주세요. 고른 만큼만 오늘 완료로 기록하고, 남은 문항은 다음 학습일부터 다시 나누어 담아요.</p>' +
-      '<div class="adj-sum"><span id="adjCount">' + selCount + ' / ' + items.length + '문항</span>' +
-      '<button type="button" class="linkbtn" data-action="adjAll">' +
-      (selCount === items.length ? '전체 해제' : '전체 선택') + '</button></div>' +
-      '<div class="adj-wrap">';
-    groups.forEach(function (g) {
-      h += '<div class="adj-book">' +
-        '<div class="adj-book-head">' + BOOKS[g.b].name +
-        '<span>' + pad3(g.s) + '~' + pad3(g.e) + ' · ' + g.items.length + '문항</span></div>' +
-        '<div class="chgrid">' + g.items.map(function (it) {
-          var k = it.b + ':' + it.n;
-          return '<button type="button" class="chcell' + (sel[k] ? ' on' : '') + '" data-action="adjToggle"' +
-            ' data-key="' + k + '" aria-pressed="' + (sel[k] ? 'true' : 'false') + '">' + it.n + '</button>';
-        }).join('') + '</div></div>';
-    });
-    h += '</div>' +
-      '<div class="btn-row">' +
+      '<p class="tiny" style="margin-top:6px">푼 번호를 콕콕 눌러 주세요. 고른 만큼만 오늘 완료로 기록하고, 남은 문항은 다음 학습일부터 다시 나누어 담아요.</p>';
+    if (items.length) {
+      h += '<div class="adj-sec-head" style="margin-top:16px">📖 성경문제</div>' +
+        '<div class="adj-sum"><span id="adjCount">' + selCount + ' / ' + items.length + '문항</span>' +
+        '<button type="button" class="linkbtn" data-action="adjAll">' +
+        (selCount === items.length ? '전체 해제' : '전체 선택') + '</button></div>' +
+        '<div class="adj-wrap">';
+      groups.forEach(function (g) {
+        h += '<div class="adj-book">' +
+          '<div class="adj-book-head">' + BOOKS[g.b].name +
+          '<span>' + pad3(g.s) + '~' + pad3(g.e) + ' · ' + g.items.length + '문항</span></div>' +
+          '<div class="chgrid">' + g.items.map(function (it) {
+            var k = it.b + ':' + it.n;
+            return '<button type="button" class="chcell' + (sel[k] ? ' on' : '') + '" data-action="adjToggle"' +
+              ' data-key="' + k + '" aria-pressed="' + (sel[k] ? 'true' : 'false') + '">' + it.n + '</button>';
+          }).join('') + '</div></div>';
+      });
+      h += '</div>';
+    }
+    if (gitems.length) {
+      h += '<div class="adj-sec-head g" style="margin-top:20px">📚 개론 예상문제</div>' +
+        '<div class="adj-sum g"><span id="gadjCount">' + gSelCount + ' / ' + gitems.length + '문항</span>' +
+        '<button type="button" class="linkbtn" data-action="gadjAll">' +
+        (gSelCount === gitems.length ? '전체 해제' : '전체 선택') + '</button></div>' +
+        '<div class="adj-wrap g">';
+      ggroups.forEach(function (g) {
+        h += '<div class="adj-book">' +
+          '<div class="adj-book-head g">' + GBOOKS[g.b].name +
+          '<span>' + pad3(g.s) + '~' + pad3(g.e) + ' · ' + g.items.length + '문항</span></div>' +
+          '<div class="chgrid">' + g.items.map(function (it) {
+            var k = it.b + ':' + it.n;
+            return '<button type="button" class="gchcell' + (gsel[k] ? ' on' : '') + '" data-action="gadjToggle"' +
+              ' data-key="' + k + '" aria-pressed="' + (gsel[k] ? 'true' : 'false') + '">' + it.n + '</button>';
+          }).join('') + '</div></div>';
+      });
+      h += '</div>';
+    }
+    h += '<div class="btn-row">' +
       '<button type="button" class="btn ghost" data-action="closeSheet">취소</button>' +
       '<button type="button" class="btn" data-action="adjApply">완료</button>' +
       '</div>';
@@ -948,7 +1221,13 @@
     var items = adjustUniverse(date);
     var sel = {};
     if (isDone(date)) itemsOfDay(d).forEach(function (it) { sel[it.b + ':' + it.n] = true; });
-    sheetState = { type: 'adjust', date: date, items: items, sel: sel };
+    var gitems = gUniverse(date);
+    var gsel = {};
+    var grec = store.g[date];
+    if (grec) gitems.forEach(function (it) {
+      if (grec.k.indexOf(it.b + ':' + it.n) >= 0) gsel[it.b + ':' + it.n] = true;
+    });
+    sheetState = { type: 'adjust', date: date, items: items, sel: sel, gitems: gitems, gsel: gsel };
     renderSheet();
     sheet.classList.add('on');
     backdrop.classList.add('on');
@@ -969,26 +1248,64 @@
     if (c) c.textContent = n + ' / ' + sheetState.items.length + '문항';
     var allBtn = sheetBody.querySelector('[data-action="adjAll"]');
     if (allBtn) allBtn.textContent = (n === sheetState.items.length) ? '전체 해제' : '전체 선택';
+
+    var gsel = sheetState.gsel || {};
+    var gcells = sheetBody.querySelectorAll('.gchcell');
+    for (var j = 0; j < gcells.length; j++) {
+      var gon = !!gsel[gcells[j].dataset.key];
+      gcells[j].classList.toggle('on', gon);
+      gcells[j].setAttribute('aria-pressed', gon ? 'true' : 'false');
+    }
+    var gn = Object.keys(gsel).length;
+    var gc = sheetBody.querySelector('#gadjCount');
+    if (gc) gc.textContent = gn + ' / ' + (sheetState.gitems || []).length + '문항';
+    var gallBtn = sheetBody.querySelector('[data-action="gadjAll"]');
+    if (gallBtn) gallBtn.textContent = (gn === (sheetState.gitems || []).length) ? '전체 해제' : '전체 선택';
   }
 
   function applyAdjust() {
     var date = sheetState.date;
     var sel = sheetState.sel || {};
+    var gsel = sheetState.gsel || {};
     var prev = store.reb;
     var prevPartial = !!(prev && prev.reason === 'partial' && prev.partialDate === date);
     var universe = adjustUniverse(date);
     var chosen = universe.filter(function (it) { return sel[it.b + ':' + it.n]; });
-    if (!chosen.length) { toast('푼 문항을 하나 이상 골라 주세요'); return; }
+    var gitems = sheetState.gitems || [];
+    var gchosen = gitems.filter(function (it) { return gsel[it.b + ':' + it.n]; });
+    if (!chosen.length && !gchosen.length) { toast('푼 문항을 하나 이상 골라 주세요'); return; }
+
+    // 개론: 오늘 푼 만큼만 기록하고, 안 푼 문항은 다음 학습일부터 다시 나뉜다
+    if (gitems.length) {
+      var gkeys = gchosen.map(function (it) { return it.b + ':' + it.n; });
+      if (gkeys.length) {
+        store.g[date] = { n: gitems.length, o: gitems.map(function (it) { return it.b + ':' + it.n; }), k: gkeys };
+      } else {
+        delete store.g[date];
+      }
+    }
+    var gMiss = gitems.length - gchosen.length;
+    var gNote = (gitems.length && gchosen.length)
+      ? ' · 📚 개론 ' + gchosen.length + '문항' + (gMiss ? ' (남은 ' + gMiss + '문항)' : '') : '';
+
+    if (!chosen.length) {
+      persist();
+      closeSheet();
+      render();
+      toast('📚 개론 ' + gchosen.length + '문항 완료 · 안 푼 문항은 다음 학습일로 넘겼어요');
+      return;
+    }
+
     var rest = universe.length - chosen.length;
     if (!rest && !prevPartial) {
       store.checks[date] = Date.now();
       persist();
       closeSheet();
       render();
-      toast('완료! ' + universe.length + '문항 진행률에 반영했어요');
+      toast('완료! ' + universe.length + '문항' + gNote + ' 진행률에 반영했어요');
       return;
     }
-    doPartial(date, chosen, universe);
+    doPartial(date, chosen, universe, gNote);
   }
 
   function renderSheet() {
@@ -1025,8 +1342,8 @@
   /* ---------- 백업 ---------- */
   function exportJSON() {
     var payload = {
-      app: 'jangsin-planner', version: 3, exportedAt: new Date().toISOString(),
-      target: P.n, includeSun: store.includeSun, checks: store.checks, reb: store.reb
+      app: 'jangsin-planner', version: 4, exportedAt: new Date().toISOString(),
+      target: P.n, includeSun: store.includeSun, checks: store.checks, reb: store.reb, g: store.g
     };
     var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     var url = URL.createObjectURL(blob);
@@ -1070,6 +1387,7 @@
       if (parsed && typeof parsed.includeSun === 'boolean') store.includeSun = parsed.includeSun;
       target = store.target;
       store.reb = parsed ? sanitizeReb(parsed.reb, target) : null;
+      store.g = parsed ? sanitizeG(parsed.g) : {};
       persist();
       replan();
       state.round = roundOfDate(TODAY);
@@ -1317,7 +1635,7 @@
   }
 
   // 고른 문항만 오늘 완료로 남기고, 나머지는 다음 학습일부터 다시 나누어 담는다
-  function doPartial(date, chosen, universe) {
+  function doPartial(date, chosen, universe, gNote) {
     var day = P.byDate[date];
     if (!day || day.skip) { toast('조정할 수 없는 날이에요'); return; }
 
@@ -1377,8 +1695,8 @@
     closeSheet();
     render();
     toast(rest.length
-      ? '오늘 ' + chosen.length + '문항 완료 · 남은 ' + rest.length + '문항을 ' + outDays.length + '일에 다시 나눴어요'
-      : '오늘 ' + chosen.length + '문항 완료 · 계획을 다시 정리했어요');
+      ? '오늘 성경 ' + chosen.length + '문항 완료 · 남은 ' + rest.length + '문항을 ' + outDays.length + '일에 다시 나눴어요' + (gNote || '')
+      : '오늘 ' + chosen.length + '문항 완료 · 계획을 다시 정리했어요' + (gNote || ''));
   }
 
   function undoRebalance() {
@@ -1447,8 +1765,48 @@
       e.preventDefault();
       var date = el.dataset.date;
       if (!P.byDate[date] || P.byDate[date].skip) return;
-      if (isDone(date)) { delete store.checks[date]; toast('완료를 취소했어요'); }
-      else { store.checks[date] = Date.now(); toast('완료! 진행률이 올라갔어요'); }
+      if (isDone(date)) {
+        delete store.checks[date];
+        delete store.g[date];
+        toast('완료를 취소했어요');
+      } else {
+        store.checks[date] = Date.now();
+        var grec0 = store.g[date];
+        var gi0 = G.byDate[date];
+        if (grec0) store.g[date] = { n: grec0.n, o: grec0.o, k: grec0.o.slice() };
+        else if (gi0) {
+          var gk0 = gi0.items.map(function (it) { return it.b + ':' + it.n; });
+          store.g[date] = { n: gi0.q, o: gk0, k: gk0.slice() };
+        }
+        toast(gi0 || grec0 ? '완료! 성경 · 개론 진행률이 올라갔어요' : '완료! 진행률이 올라갔어요');
+      }
+      persist();
+      render();
+      if (sheetState && sheetState.type === 'day') renderSheet();
+      return;
+    }
+    if (a === 'toggleTrack') {
+      e.preventDefault();
+      var tdate = el.dataset.date, tr = el.dataset.track;
+      if (!P.byDate[tdate] || P.byDate[tdate].skip) return;
+      if (tr === 'bible') {
+        if (isDone(tdate)) { delete store.checks[tdate]; toast('📖 성경문제 완료를 취소했어요'); }
+        else { store.checks[tdate] = Date.now(); toast('📖 성경문제 완료!'); }
+      } else {
+        var grec1 = store.g[tdate];
+        var gi1 = G.byDate[tdate];
+        if (grec1 && grec1.k.length >= grec1.o.length) {
+          delete store.g[tdate];
+          toast('📚 개론 완료를 취소했어요');
+        } else if (grec1) {
+          store.g[tdate] = { n: grec1.n, o: grec1.o, k: grec1.o.slice() };
+          toast('📚 개론 ' + grec1.o.length + '문항 완료!');
+        } else if (gi1) {
+          var gk1 = gi1.items.map(function (it) { return it.b + ':' + it.n; });
+          store.g[tdate] = { n: gi1.q, o: gk1, k: gk1.slice() };
+          toast('📚 개론 ' + gk1.length + '문항 완료!');
+        }
+      }
       persist();
       render();
       if (sheetState && sheetState.type === 'day') renderSheet();
@@ -1483,6 +1841,25 @@
       }
       return;
     }
+    if (a === 'gadjToggle') {
+      var gk = el.dataset.key;
+      if (sheetState && sheetState.type === 'adjust') {
+        if (sheetState.gsel[gk]) delete sheetState.gsel[gk];
+        else sheetState.gsel[gk] = true;
+        updateAdjustUI();
+      }
+      return;
+    }
+    if (a === 'gadjAll') {
+      if (sheetState && sheetState.type === 'adjust') {
+        var gitems = sheetState.gitems || [];
+        var gAllOn = Object.keys(sheetState.gsel).length === gitems.length;
+        sheetState.gsel = {};
+        if (!gAllOn) gitems.forEach(function (it) { sheetState.gsel[it.b + ':' + it.n] = true; });
+        updateAdjustUI();
+      }
+      return;
+    }
     if (a === 'adjApply') { applyAdjust(); return; }
     if (a === 'openDay') { openSheet({ type: 'day', date: el.dataset.date }); return; }
     if (a === 'toggleSun') { setIncludeSun(!store.includeSun); return; }
@@ -1512,9 +1889,11 @@
       return;
     }
     if (a === 'reset') {
-      if (!Object.keys(store.checks).length) { toast('지울 기록이 없어요'); return; }
-      if (!window.confirm('모든 체크 기록(' + Object.keys(store.checks).length + '개)을 지울까요? 되돌릴 수 없어요.')) return;
+      if (!Object.keys(store.checks).length && !Object.keys(store.g || {}).length) { toast('지울 기록이 없어요'); return; }
+      if (!window.confirm('모든 체크 기록(' + (Object.keys(store.checks).length + Object.keys(store.g || {}).length) +
+        '개)을 지울까요? 되돌릴 수 없어요.')) return;
       store.checks = {};
+      store.g = {};
       persist();
       render();
       if (sheetState) renderSheet();
