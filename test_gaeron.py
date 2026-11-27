@@ -432,10 +432,10 @@ with sync_playwright() as p:
     # =========================================================
     idx = open(os.path.join(ROOT, 'index.html'), encoding='utf-8').read()
     sw = open(os.path.join(ROOT, 'sw.js'), encoding='utf-8').read()
-    check('index.html 스크립트 버전 맞춤', 'app.js?v=6' in idx and 'schedule.js?v=6' in idx,
+    check('index.html 스크립트 버전 맞춤', 'app.js?v=7' in idx and 'schedule.js?v=7' in idx,
           [l for l in idx.splitlines() if 'app.js' in l or 'schedule.js' in l])
-    check('sw.js 캐시 v6', "jangsin-planner-v6" in sw, sw.splitlines()[2])
-    check('sw.js 자산 버전 맞춤', "./app.js?v=6" in sw and "./schedule.js?v=6" in sw)
+    check('sw.js 캐시 v7', "jangsin-planner-v7" in sw, sw.splitlines()[2])
+    check('sw.js 자산 버전 맞춤', "./app.js?v=7" in sw and "./schedule.js?v=7" in sw)
 
     # 라이브 화면(390px) 캡처 — 오늘 탭
     open_app(pg, SEED5, '2026-11-25')

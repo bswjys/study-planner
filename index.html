@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>장신대 플래너</title>
 <meta name="description" content="장신대 신학대학원 입학고사 회독 공부 계획과 진도 관리">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -342,6 +342,19 @@ details.guide[open] summary::after{content:"–"}
   .tabbar{background:rgba(255,255,255,.98)}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* ===== 아이폰 화면 고정 (2026-11-28) =====
+   사파리·홈 화면 앱에서 화면이 커졌다 작아졌다 하지 않도록
+   - 입력창 글자는 16px 이상(아이폰 자동 확대 방지)
+   - 가로 넘침·바운스 스크롤 막음, 글자 자동 확대 막음 */
+html, body {
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+html { touch-action: manipulation; }
+input, textarea, select { font-size: max(16px, 1em); }
 </style>
 </head>
 <body>
@@ -383,7 +396,7 @@ details.guide[open] summary::after{content:"–"}
 </section>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script src="schedule.js?v=6"></script>
-<script src="app.js?v=6"></script>
+<script src="schedule.js?v=7"></script>
+<script src="app.js?v=7"></script>
 </body>
 </html>
