@@ -1105,6 +1105,24 @@
   var sheetBody = document.getElementById('sheetBody');
   var backdrop = document.getElementById('backdrop');
   var sheetState = null;
+  /* 모달·추가창 화면 고정 (2026-11-28)
+     시트를 열 때 스크롤 위치를 저장하고 body를 fixed로 잠가 배경이 흔들리지 않게 한다. */
+  var lockedScrollY = null;
+  function syncSheetLock() {
+    var open = sheet.classList.contains('on');
+    var isLocked = document.body.classList.contains('modal-open');
+    if (open && !isLocked) {
+      lockedScrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
+      document.body.style.top = '-' + lockedScrollY + 'px';
+      document.body.classList.add('modal-open');
+    } else if (!open && isLocked) {
+      document.body.classList.remove('modal-open');
+      document.body.style.top = '';
+      var backY = lockedScrollY || 0;
+      lockedScrollY = null;
+      window.scrollTo(0, backY);
+    }
+  }
 
   function daySheetHtml(date) {
     var d = P.byDate[date];
@@ -1232,6 +1250,7 @@
     sheet.classList.add('on');
     backdrop.classList.add('on');
     sheet.setAttribute('aria-hidden', 'false');
+    syncSheetLock();
   }
 
   function updateAdjustUI() {
@@ -1321,12 +1340,14 @@
     sheet.classList.add('on');
     backdrop.classList.add('on');
     sheet.setAttribute('aria-hidden', 'false');
+    syncSheetLock();
   }
   function closeSheet() {
     sheetState = null;
     sheet.classList.remove('on');
     backdrop.classList.remove('on');
     sheet.setAttribute('aria-hidden', 'true');
+    syncSheetLock();
   }
 
   /* ---------- 토스트 ---------- */

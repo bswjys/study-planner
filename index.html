@@ -35,6 +35,15 @@ body{
   -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
   word-break:keep-all;overflow-wrap:break-word;
 }
+/* ===== 모달·추가창 화면 고정 (2026-11-28) =====
+   바텀시트가 열린 동안 배경 스크롤을 잠그고, 시트가 흔들리지 않게 함
+   - body.modal-open: 여는 순간의 스크롤 위치(top)는 JS가 맞춘다 */
+body.modal-open{
+  position:fixed;left:0;right:0;width:100%;
+  overflow:hidden;overscroll-behavior:none;
+}
+.backdrop{ overflow-x:hidden; overscroll-behavior:contain; }
+.sheet{ overflow-x:hidden; overscroll-behavior:contain; touch-action:pan-y; -webkit-overflow-scrolling:touch; }
 button{font:inherit;letter-spacing:inherit;color:inherit;border:0;background:transparent;padding:0;-webkit-appearance:none;appearance:none}
 button:focus{outline:none}
 button:focus-visible{outline:2px solid var(--pri);outline-offset:2px}
@@ -396,7 +405,7 @@ input, textarea, select { font-size: max(16px, 1em); }
 </section>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script src="schedule.js?v=7"></script>
-<script src="app.js?v=7"></script>
+<script src="schedule.js?v=8"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>
